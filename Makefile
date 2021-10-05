@@ -27,6 +27,7 @@ CMAKE_FLAGS := ${CMAKE_FLAGS} \
       		-DOPENCLROOT=/usr/local/cuda \
       		-DCUBLAS_INCLUDE_DIR=/usr/local/cuda/targets/x86_64-linux/include/ \
       		-DCUBLAS_LIBRARY=/usr/local/cuda/targets/x86_64-linux/lib/libcublas.so 
+CC_COMPILER=${TOOLCHAIN_DIR}/llvm/build/bin/clang
 CXX_COMPILER=${TOOLCHAIN_DIR}/llvm/build/bin/clang++
 LDFLAGS = ${TOOLCHAIN_DIR}/llvm/build/install/lib
 else
@@ -72,6 +73,7 @@ build:
 	@$(call msg,Building oneDNN  ...)
 	@mkdir -p ${BUILD_DIR} && cd ${BUILD_DIR} && \
 		bash -c  'source ${ONEAPI_ROOT}/setvars.sh --force && \
+		CC=${CC_COMPILER} \
 		CXX=${CXX_COMPILER} \
 		CXXFLAGS=${CXX_FLAGS} \
 		LDFLAGS=${LDFLAGS} \
