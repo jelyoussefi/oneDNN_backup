@@ -44,7 +44,7 @@ default: build
 .PHONY: build
 
 toolchain:
-ifneq (${CUDA},ON)
+ifeq (${CUDA},ON)
 	@if [ ! -f "${TOOLCHAIN_DIR}/.done" ]; then \
 		mkdir -p ${TOOLCHAIN_DIR} && rm -rf ${TOOLCHAIN_DIR}/* && \
 		$(call msg,Building Cuda Toolchain  ...) && \
@@ -72,7 +72,7 @@ install-oneapi:
 		sudo apt install -y intel-basekit ; \
 	fi
 	
-build: 	
+build: toolchain	
 	@$(call msg,Building oneDNN  ...)
 	@mkdir -p ${BUILD_DIR} && cd ${BUILD_DIR} && \
 		bash -c  'source ${ONEAPI_ROOT}/setvars.sh --force && \
