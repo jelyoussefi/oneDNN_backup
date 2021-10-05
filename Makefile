@@ -20,6 +20,8 @@ CMAKE_FLAGS = 	-DDNNL_LIBRARY_TYPE=SHARED \
       
 ifeq ($(CUDA),ON)
 CMAKE_FLAGS := ${CMAKE_FLAGS} \
+		-DCMAKE_C_COMPILER=${TOOLCHAIN_DIR}/llvm/build/bin/clang \
+      		-DCMAKE_CXX_COMPILER=${TOOLCHAIN_DIR}/llvm/build/bin/clang++ \
       		-DDNNL_SYCL_CUDA=ON \
      		-DCMAKE_PREFIX_PATH=/usr/local/cuda/ \
       		-DDNNL_GPU_VENDOR=NVIDIA \
@@ -27,11 +29,12 @@ CMAKE_FLAGS := ${CMAKE_FLAGS} \
       		-DOPENCLROOT=/usr/local/cuda \
       		-DCUBLAS_INCLUDE_DIR=/usr/local/cuda/targets/x86_64-linux/include/ \
       		-DCUBLAS_LIBRARY=/usr/local/cuda/targets/x86_64-linux/lib/libcublas.so 
-CC_COMPILER=${TOOLCHAIN_DIR}/llvm/build/bin/clang
-CXX_COMPILER=${TOOLCHAIN_DIR}/llvm/build/bin/clang++
 LDFLAGS = ${TOOLCHAIN_DIR}/llvm/build/install/lib
+TOOLCHAIN_FLAGS = --cuda --cmake-opt=-DCMAKE_PREFIX_PATH="/usr/local/cuda/lib64/stubs/"
 else
-CXX_COMPILER=$${ONEAPI_ROOT}/compiler/latest/linux/bin/dpcpp
+CMAKE_FLAGS := ${CMAKE_FLAGS} \
+		-DCMAKE_C_COMPILER=${ONEAPI_ROOT}/compiler/latest/linux/bin/clang \
+      		-DCMAKE_CXX_COMPILER=${ONEAPI_ROOT}/compiler/latest/linux/bin/clang++ 
 endif
 
 #----------------------------------------------------------------------------------------------------------------------
@@ -73,7 +76,6 @@ build:
 	@$(call msg,Building oneDNN  ...)
 	@mkdir -p ${BUILD_DIR} && cd ${BUILD_DIR} && \
 		bash -c  'source ${ONEAPI_ROOT}/setvars.sh --force && \
-		CC=${CC_COMPILER} \
 		CXX=${CXX_COMPILER} \
 		CXXFLAGS=${CXX_FLAGS} \
 		LDFLAGS=${LDFLAGS} \
