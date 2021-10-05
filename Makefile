@@ -13,31 +13,49 @@ export TERM=xterm
 
 CUDA ?= OFF
 
-CMAKE_FLAGS = 	-DCMAKE_C_COMPILER=clang \
-      		-DCMAKE_CXX_COMPILER=clang++ \
-      		-DDNNL_LIBRARY_TYPE=SHARED \
+CMAKE_FLAGS = 	-DDNNL_LIBRARY_TYPE=SHARED \
       		-DCMAKE_BUILD_TYPE=release \
       		-DDNNL_CPU_RUNTIME=DPCPP \
       		-DDNNL_GPU_RUNTIME=DPCPP 
       
 ifeq ($(CUDA),ON)
-CMAKE_FLAGS ?= ${CMAKE_FLAGS} \
-      -DDNNL_SYCL_CUDA=ON \
-      -DCMAKE_PREFIX_PATH=/usr/local/cuda/ \
-      -DDNNL_GPU_VENDOR=NVIDIA \
-      -DCUDA_DRIVER_LIBRARY=/usr/local/cuda/targets/x86_64-linux/lib/stubs/libcuda.so \
-      -DOPENCLROOT=/usr/local/cuda \
-      -DCUBLAS_INCLUDE_DIR=/usr/local/cuda/targets/x86_64-linux/include/ \
-      -DCUBLAS_LIBRARY=/usr/local/cuda/targets/x86_64-linux/lib/libcublas.so 
+CMAKE_FLAGS := ${CMAKE_FLAGS} \
+		-DCMAKE_C_COMPILER=${TOOLCHAIN_DIR}/llvm/build/bin/clang \
+      		-DCMAKE_CXX_COMPILER=${TOOLCHAIN_DIR}/llvm/build/bin/clang++ \
+      		-DDNNL_SYCL_CUDA=ON \
+     		-DCMAKE_PREFIX_PATH=/usr/local/cuda/ \
+      		-DDNNL_GPU_VENDOR=NVIDIA \
+      		-DCUDA_DRIVER_LIBRARY=/usr/local/cuda/targets/x86_64-linux/lib/stubs/libcuda.so \
+      		-DOPENCLROOT=/usr/local/cuda \
+      		-DCUBLAS_INCLUDE_DIR=/usr/local/cuda/targets/x86_64-linux/include/ \
+      		-DCUBLAS_LIBRARY=/usr/local/cuda/targets/x86_64-linux/lib/libcublas.so 
+LDFLAGS = ${TOOLCHAIN_DIR}/llvm/build/install/lib
+else
+CMAKE_FLAGS := ${CMAKE_FLAGS} \
+		-DCMAKE_C_COMPILER=${ONEAPI_ROOT}/compiler/latest/linux/bin/clang \
+      		-DCMAKE_CXX_COMPILER=${ONEAPI_ROOT}/compiler/latest/linux/bin/clang++ 
 endif
-
-
 
 #----------------------------------------------------------------------------------------------------------------------
 # Targets
 #----------------------------------------------------------------------------------------------------------------------
 default: build 
 .PHONY: build
+
+toolchain:
+ifneq (${CUDA},ON)
+	@if [ ! -f "${TOOLCHAIN_DIR}/.done" ]; then \
+		mkdir -p ${TOOLCHAIN_DIR} && rm -rf ${TOOLCHAIN_DIR}/* && \
+		$(call msg,Building Cuda Toolchain  ...) && \
+		cd ${TOOLCHAIN_DIR} && \
+			dpkg -l ninja-build  > /dev/null 2>&1  || sudo apt install -y ninja-build && \
+			git clone https://github.com/intel/llvm -b sycl && \
+			cd llvm && \
+				python ./buildbot/configure.py   ${TOOLCHAIN_FLAGS} && \
+				python ./buildbot/compile.py && \
+		touch ${TOOLCHAIN_DIR}/.done; \
+	fi
+endif
 
 install-oneapi:
 	@if [ ! -f "${ONEAPI_ROOT}/setvars.sh" ]; then \
@@ -53,11 +71,11 @@ install-oneapi:
 		sudo apt install -y intel-basekit ; \
 	fi
 	
-
 build: 	
 	@$(call msg,Building oneDNN  ...)
 	@mkdir -p ${BUILD_DIR} && cd ${BUILD_DIR} && \
 		bash -c  'source ${ONEAPI_ROOT}/setvars.sh --force && \
+		LDFLAGS=${LDFLAGS} \
 		cmake ${CMAKE_FLAGS} .. && \
 		make -j`nproc` '
 
