@@ -13,31 +13,14 @@ export TERM=xterm
 
 CUDA ?= OFF
 
-CMAKE_FLAGS = 	-DDNNL_LIBRARY_TYPE=SHARED \
-      		-DCMAKE_BUILD_TYPE=release \
-      		-DDNNL_CPU_RUNTIME=DPCPP \
-      		-DDNNL_GPU_RUNTIME=DPCPP 
-      
-ifeq ($(CUDA),ON)
-CMAKE_FLAGS := ${CMAKE_FLAGS} \
-		-DCMAKE_C_COMPILER=${TOOLCHAIN_DIR}/llvm/build/bin/clang \
-      		-DCMAKE_CXX_COMPILER=${TOOLCHAIN_DIR}/llvm/build/bin/clang++ \
-      		-DDNNL_SYCL_CUDA=ON \
-     		-DCMAKE_PREFIX_PATH=/usr/local/cuda/ \
-      		-DDNNL_GPU_VENDOR=NVIDIA \
-      		-DCUDA_DRIVER_LIBRARY=/usr/local/cuda/targets/x86_64-linux/lib/stubs/libcuda.so \
-      		-DOPENCLROOT=/usr/local/cuda \
-      		-DCUBLAS_INCLUDE_DIR=/usr/local/cuda/targets/x86_64-linux/include/ \
-      		-DCUBLAS_LIBRARY=/usr/local/cuda/targets/x86_64-linux/lib/libcublas.so 
-LDFLAGS = ${TOOLCHAIN_DIR}/llvm/build/install/lib
-CXX_COMPILER=${TOOLCHAIN_DIR}/llvm/build/bin/clang++
-TOOLCHAIN_FLAGS = --cuda --cmake-opt=-DCMAKE_PREFIX_PATH="/usr/local/cuda/lib64/stubs/"
-else
-CMAKE_FLAGS := ${CMAKE_FLAGS} \
-		-DCMAKE_C_COMPILER=${ONEAPI_ROOT}/compiler/latest/linux/bin/clang \
-      		-DCMAKE_CXX_COMPILER=${ONEAPI_ROOT}/compiler/latest/linux/bin/clang++ 
-CXX_COMPILER=$${ONEAPI_ROOT}/compiler/latest/linux/bin/dpcpp
-endif
+CMAKE_FLAGS = 	-DDNNL_CPU_RUNTIME=DPCPP \
+		-DDNNL_GPU_RUNTIME=DPCPP \
+      		-DDNNL_GPU_VENDOR=NVIDIA  \
+      		-DOPENCLROOT=/usr/local/cuda-11.4/targets/x86_64-linux/lib
+
+export CC=$${ONEAPI_ROOT}/compiler/latest/linux/bin/clang
+export CXX=$${ONEAPI_ROOT}/compiler/latest/linux/bin/clang++
+
 
 #----------------------------------------------------------------------------------------------------------------------
 # Targets
@@ -76,11 +59,8 @@ install-oneapi:
 	
 build: toolchain	
 	@$(call msg,Building oneDNN  ...)
-	@mkdir -p ${BUILD_DIR} && cd ${BUILD_DIR} && \
+	mkdir -p ${BUILD_DIR} && cd ${BUILD_DIR} && \
 		bash -c  'source ${ONEAPI_ROOT}/setvars.sh --force && \
-		CXXFLAGS=${CXX_FLAGS} \
-		CXXFLAGS=${CXX_FLAGS} \
-		LDFLAGS=${LDFLAGS} \
 		cmake ${CMAKE_FLAGS} .. && \
 		make -j`nproc` '
 
