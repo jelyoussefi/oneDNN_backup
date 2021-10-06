@@ -30,11 +30,13 @@ CMAKE_FLAGS := ${CMAKE_FLAGS} \
       		-DCUBLAS_INCLUDE_DIR=/usr/local/cuda/targets/x86_64-linux/include/ \
       		-DCUBLAS_LIBRARY=/usr/local/cuda/targets/x86_64-linux/lib/libcublas.so 
 LDFLAGS = ${TOOLCHAIN_DIR}/llvm/build/install/lib
+CXX_COMPILER=${TOOLCHAIN_DIR}/llvm/build/bin/clang++
 TOOLCHAIN_FLAGS = --cuda --cmake-opt=-DCMAKE_PREFIX_PATH="/usr/local/cuda/lib64/stubs/"
 else
 CMAKE_FLAGS := ${CMAKE_FLAGS} \
 		-DCMAKE_C_COMPILER=${ONEAPI_ROOT}/compiler/latest/linux/bin/clang \
       		-DCMAKE_CXX_COMPILER=${ONEAPI_ROOT}/compiler/latest/linux/bin/clang++ 
+CXX_COMPILER=$${ONEAPI_ROOT}/compiler/latest/linux/bin/dpcpp
 endif
 
 #----------------------------------------------------------------------------------------------------------------------
@@ -76,7 +78,7 @@ build: toolchain
 	@$(call msg,Building oneDNN  ...)
 	@mkdir -p ${BUILD_DIR} && cd ${BUILD_DIR} && \
 		bash -c  'source ${ONEAPI_ROOT}/setvars.sh --force && \
-		CXX=${CXX_COMPILER} \
+		CXXFLAGS=${CXX_FLAGS} \
 		CXXFLAGS=${CXX_FLAGS} \
 		LDFLAGS=${LDFLAGS} \
 		cmake ${CMAKE_FLAGS} .. && \
