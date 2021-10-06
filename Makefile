@@ -18,8 +18,8 @@ CMAKE_FLAGS = 	-DDNNL_CPU_RUNTIME=DPCPP \
       		-DDNNL_GPU_VENDOR=NVIDIA  \
       		-DOPENCLROOT=/usr/local/cuda-11.4/targets/x86_64-linux/lib
 
-export CC=$${ONEAPI_ROOT}/compiler/latest/linux/bin/clang
-export CXX=$${ONEAPI_ROOT}/compiler/latest/linux/bin/clang++
+export CC=${ONEAPI_ROOT}/compiler/latest/linux/bin/clang
+export CXX=${ONEAPI_ROOT}/compiler/latest/linux/bin/clang++
 
 
 #----------------------------------------------------------------------------------------------------------------------
