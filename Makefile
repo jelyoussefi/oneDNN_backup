@@ -16,7 +16,15 @@ CUDA ?= OFF
 CMAKE_FLAGS = 	-DDNNL_CPU_RUNTIME=DPCPP \
 		-DDNNL_GPU_RUNTIME=DPCPP \
       		-DDNNL_GPU_VENDOR=NVIDIA  \
-      		-DOPENCLROOT=/usr/local/cuda-11.4/targets/x86_64-linux/lib
+		-DDNNL_SYCL_CUDA=ON \
+		-DCMAKE_PREFIX_PATH=/usr/local/cuda/ \
+		-DDNNL_GPU_VENDOR=NVIDIA \
+		-DCUDA_DRIVER_LIBRARY=/usr/local/cuda/targets/x86_64-linux/lib/stubs/libcuda.so \
+		-DOPENCLROOT=/usr/local/cuda \
+		-DCUBLAS_INCLUDE_DIR=/usr/local/cuda/targets/x86_64-linux/include/ \
+		-DCUBLAS_LIBRARY=/usr/local/cuda/targets/x86_64-linux/lib/libcublas.so 
+ 
+ #     		-DOPENCLROOT=/usr/local/cuda-11.4/targets/x86_64-linux/lib
 
 export CC=${ONEAPI_ROOT}/compiler/latest/linux/bin/clang
 export CXX=${ONEAPI_ROOT}/compiler/latest/linux/bin/clang++
