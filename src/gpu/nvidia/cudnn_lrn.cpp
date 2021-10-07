@@ -40,7 +40,7 @@ status_t cudnn_lrn_fwd_t::execute(const exec_ctx_t &ctx) const {
                 ? CTX_OUT_ACCESSOR(DNNL_ARG_WORKSPACE)
                 : dst_acc;
 
-        cgh.interop_task([=](const cl::sycl::interop_handler &ih) {
+        cgh.host_task([=](const cl::sycl::interop_handle &ih) {
             auto &sycl_engine = *utils::downcast<sycl_cuda_engine_t *>(
                     cuda_stream->engine());
             auto sc = cuda_sycl_scoped_context_handler_t(sycl_engine);
@@ -66,7 +66,7 @@ status_t cudnn_lrn_bwd_t::execute(const exec_ctx_t &ctx) const {
         auto diff_src_acc = CTX_OUT_ACCESSOR(DNNL_ARG_DIFF_SRC);
         auto ws_acc = CTX_IN_ACCESSOR(DNNL_ARG_WORKSPACE);
 
-        cgh.interop_task([=](const cl::sycl::interop_handler &ih) mutable {
+        cgh.host_task([=](const cl::sycl::interop_handle &ih) mutable {
             std::vector<void *> args;
             auto &sycl_engine = *utils::downcast<sycl_cuda_engine_t *>(
                     cuda_stream->engine());

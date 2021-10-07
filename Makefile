@@ -10,7 +10,7 @@ TOOLS_DIR=${CURRENT_DIR}/tools
 
 export TERM=xterm
 
-CUDA ?= OFF
+CUDA ?= ON
 
 CMAKE_FLAGS = 	-DDNNL_LIBRARY_TYPE=SHARED \
       		-DCMAKE_BUILD_TYPE=release \
@@ -34,8 +34,8 @@ TOOLCHAIN_FLAGS = --cuda --cmake-opt=-DCMAKE_PREFIX_PATH="/usr/local/cuda/lib64/
 
 endif
 
-export CC=${TOOLCHAIN_DIR}/llvm/build/bin/clang
-export CXX=${TOOLCHAIN_DIR}/llvm/build/bin/clang++
+CXX_COMPILER=${TOOLCHAIN_DIR}/llvm/build/bin/clang++
+CXX_FLAGS="-fsycl -fopenmp -O3  "
 
 #----------------------------------------------------------------------------------------------------------------------
 # Targets
@@ -61,10 +61,11 @@ toolchain:
 build: toolchain	
 	@$(call msg,Building oneDNN  ...)
 	mkdir -p ${BUILD_DIR} && cd ${BUILD_DIR} && \
-		bash -c  ' \
+		CXX=${CXX_COMPILER} \
+		CXXFLAGS=${CXX_FLAGS} \
+		bash -c  ' ${BUILD_FLAGS} \
 		cmake ${CMAKE_FLAGS} .. && \
-		make -j`nproc` '
-
+		make -j 8 '
 
 install:
 	@$(call msg,Installing oneDNN  ...)
@@ -77,6 +78,7 @@ clean:
 
 distclean: clean
 	@rm -rf ${TOOLCHAIN_DIR}
+	
 #----------------------------------------------------------------------------------------------------------------------
 # helper functions
 #----------------------------------------------------------------------------------------------------------------------
