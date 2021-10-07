@@ -50,6 +50,11 @@ public:
     inline T memory(const cl::sycl::interop_handler &ih, U acc) {
         return reinterpret_cast<T>(ih.get_mem<cl::sycl::backend::cuda>(acc));
     }
+
+    template <typename T, typename U>
+    inline T memory(const cl::sycl::interop_handle &ih, U acc) {
+        return reinterpret_cast<T>(ih.get_native_mem<cl::sycl::backend::cuda>(acc));
+    }
 };
 
 } // namespace nvidia
