@@ -33,7 +33,7 @@ status_t cudnn_resampling_fwd_t::execute(const exec_ctx_t &ctx) const {
     nvidia::sycl_cuda_stream_t *cuda_stream
             = utils::downcast<nvidia::sycl_cuda_stream_t *>(ctx.stream());
 
-    cuda_stream->interop_task([&](cl::sycl::handle &cgh) {
+    cuda_stream->interop_task([&](cl::sycl::handler &cgh) {
         auto src_acc = CTX_IN_ACCESSOR(DNNL_ARG_SRC);
         auto dst_acc = CTX_OUT_ACCESSOR(DNNL_ARG_DST);
         auto grid_acc = buffer(grid_storage_.get())
