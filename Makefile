@@ -8,7 +8,6 @@ BUILD_DIR=${CURRENT_DIR}/build
 TOOLCHAIN_DIR=${CURRENT_DIR}/toolchain
 TOOLS_DIR=${CURRENT_DIR}/tools
 
-ONEAPI_ROOT ?= /opt/intel/oneapi
 export TERM=xterm
 
 CUDA ?= OFF
@@ -16,45 +15,27 @@ CUDA ?= OFF
 CMAKE_FLAGS = 	-DDNNL_LIBRARY_TYPE=SHARED \
       		-DCMAKE_BUILD_TYPE=release \
       		-DDNNL_CPU_RUNTIME=DPCPP \
-      		-DDNNL_GPU_RUNTIME=DPCPP 
-      
+      		-DDNNL_GPU_RUNTIME=DPCPP \
+		-DDNNL_BUILD_EXAMPLES=ON      
+		
 ifeq ($(CUDA),ON)
 CMAKE_FLAGS := ${CMAKE_FLAGS} \
 		-DCMAKE_C_COMPILER=${TOOLCHAIN_DIR}/llvm/build/bin/clang \
       		-DCMAKE_CXX_COMPILER=${TOOLCHAIN_DIR}/llvm/build/bin/clang++ \
       		-DDNNL_SYCL_CUDA=ON \
-     		-DCMAKE_PREFIX_PATH=/usr/local/cuda/ \
       		-DDNNL_GPU_VENDOR=NVIDIA \
       		-DCUDA_DRIVER_LIBRARY=/usr/local/cuda/targets/x86_64-linux/lib/stubs/libcuda.so \
-      		-DOPENCLROOT=/usr/local/cuda \
+		-DOpenCL_INCLUDE_DIR=${TOOLCHAIN_DIR}/llvm/build/install/include/sycl/ \
+      		-DOpenCL_LIBRARY=${TOOLCHAIN_DIR}/llvm/build/lib/libOpenCL.so \
       		-DCUBLAS_INCLUDE_DIR=/usr/local/cuda/targets/x86_64-linux/include/ \
       		-DCUBLAS_LIBRARY=/usr/local/cuda/targets/x86_64-linux/lib/libcublas.so 
-CC_COMPILER=${TOOLCHAIN_DIR}/llvm/build/bin/clang
-CXX_COMPILER=${TOOLCHAIN_DIR}/llvm/build/bin/clang++
+      		
 TOOLCHAIN_FLAGS = --cuda --cmake-opt=-DCMAKE_PREFIX_PATH="/usr/local/cuda/lib64/stubs/"
-else
-CMAKE_FLAGS := ${CMAKE_FLAGS} \
-		-DCMAKE_C_COMPILER=${ONEAPI_ROOT}/compiler/latest/linux/bin/clang \
-      		-DCMAKE_CXX_COMPILER=${ONEAPI_ROOT}/compiler/latest/linux/bin/clang++ 
-CC_COMPILER=$${ONEAPI_ROOT}/compiler/latest/linux/bin/dpcpp
-CXX_COMPILER=$${ONEAPI_ROOT}/compiler/latest/linux/bin/dpcpp
+
 endif
 
-
-
-CMAKE_FLAGS = 	-DDNNL_CPU_RUNTIME=DPCPP \
-		-DDNNL_GPU_RUNTIME=DPCPP \
-      		-DDNNL_GPU_VENDOR=NVIDIA  \
-		-DDNNL_SYCL_CUDA=ON \
-		-DCMAKE_PREFIX_PATH=/usr/local/cuda/ \
-		-DDNNL_GPU_VENDOR=NVIDIA \
-		-DCUDA_DRIVER_LIBRARY=/usr/local/cuda/targets/x86_64-linux/lib/stubs/libcuda.so \
-		-DOPENCLROOT=/usr/local/cuda \
-		-DCUBLAS_INCLUDE_DIR=/usr/local/cuda/targets/x86_64-linux/include/ \
-		-DCUBLAS_LIBRARY=/usr/local/cuda/targets/x86_64-linux/lib/libcublas.s
-
-export CC=${CC_COMPILER}
-export CXX=${CXX_COMPILER}
+export CC=${TOOLCHAIN_DIR}/llvm/build/bin/clang
+export CXX=${TOOLCHAIN_DIR}/llvm/build/bin/clang++
 
 #----------------------------------------------------------------------------------------------------------------------
 # Targets
@@ -63,7 +44,7 @@ default: build
 .PHONY: build
 
 toolchain:
-ifeq (${CUDA},ON)
+
 	@if [ ! -f "${TOOLCHAIN_DIR}/.done" ]; then \
 		mkdir -p ${TOOLCHAIN_DIR} && rm -rf ${TOOLCHAIN_DIR}/* && \
 		$(call msg,Building Cuda Toolchain  ...) && \
@@ -75,39 +56,27 @@ ifeq (${CUDA},ON)
 				python ./buildbot/compile.py && \
 		touch ${TOOLCHAIN_DIR}/.done; \
 	fi
-endif
 
-install-oneapi:
-	@if [ ! -f "${ONEAPI_ROOT}/setvars.sh" ]; then \
-		$(call msg,Installing OneAPI ...) && \
-		sudo apt update -y  && \
-		sudo apt install -y wget software-properties-common && \
-		wget https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB && \
-		sudo apt-key add GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB && \
-		sudo rm GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB && \
-		sudo echo "deb https://apt.repos.intel.com/oneapi all main" | sudo tee /etc/apt/sources.list.d/oneAPI.list && \
-		sudo add-apt-repository "deb https://apt.repos.intel.com/oneapi all main" && \
-		sudo apt update -y && \
-		sudo apt install -y intel-basekit ; \
-	fi
-	
+
 build: toolchain	
 	@$(call msg,Building oneDNN  ...)
 	mkdir -p ${BUILD_DIR} && cd ${BUILD_DIR} && \
-		bash -c  'source ${ONEAPI_ROOT}/setvars.sh --force && \
+		bash -c  ' \
 		cmake ${CMAKE_FLAGS} .. && \
 		make -j`nproc` '
 
 
 install:
 	@$(call msg,Installing oneDNN  ...)
-	@sudo make install
+	@cd ${BUILD_DIR} && \
+		sudo make install
 
 clean:
 	@rm -rf  ${BUILD_DIR}
 
 
-
+distclean: clean
+	@rm -rf ${TOOLCHAIN_DIR}
 #----------------------------------------------------------------------------------------------------------------------
 # helper functions
 #----------------------------------------------------------------------------------------------------------------------
