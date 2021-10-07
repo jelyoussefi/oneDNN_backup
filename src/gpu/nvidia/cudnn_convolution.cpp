@@ -238,10 +238,10 @@ status_t cudnn_convolution_bwd_weights_t::execute_convolution(
 
             std::vector<void *> args;
             args.push_back(ih.get_native_mem(x_acc));
-            args.push_back(ih.get_native_memweights_acc));
-            args.push_back(ih.get_native_memy_acc));
+            args.push_back(ih.get_native_mem(weights_acc));
+            args.push_back(ih.get_native_mem(y_acc));
             args.push_back(
-                    with_bias ? ih.get_native_mem*bias_acc) : nullptr);
+                    with_bias ? ih.get_native_mem(*bias_acc) : nullptr);
             args.push_back(with_scratchpad ? ih.get_native_mem(*scratch_acc)
                                            : nullptr);
             args.push_back(pd()->impl_->using_transformed_filter()
