@@ -36,7 +36,7 @@ status_t cudnn_softmax_fwd_t::execute(const exec_ctx_t &ctx) const {
         auto src_acc = CTX_IN_ACCESSOR(DNNL_ARG_SRC);
         auto dst_acc = CTX_OUT_ACCESSOR(DNNL_ARG_DST);
 
-        cgh.host_task([=](const cl::sycl::host_handle &ih) {
+        cgh.host_task([=](const cl::sycl::interop_handle &ih) {
             std::vector<void *> args;
             auto &sycl_engine = *utils::downcast<sycl_cuda_engine_t *>(
                     cuda_stream->engine());
