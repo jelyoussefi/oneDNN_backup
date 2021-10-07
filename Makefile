@@ -60,12 +60,12 @@ toolchain:
 
 build: toolchain	
 	@$(call msg,Building oneDNN  ...)
-	mkdir -p ${BUILD_DIR} && cd ${BUILD_DIR} && \
+	@mkdir -p ${BUILD_DIR} && cd ${BUILD_DIR} && \
 		CXX=${CXX_COMPILER} \
 		CXXFLAGS=${CXX_FLAGS} \
-		bash -c  ' ${BUILD_FLAGS} \
+		bash -c  ' \
 		cmake ${CMAKE_FLAGS} .. && \
-		make -j 8 '
+		make  -j`nproc` '
 
 install:
 	@$(call msg,Installing oneDNN  ...)
