@@ -5,8 +5,7 @@ SHELL:=/bin/bash
 
 CURRENT_DIR:=$(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
 BUILD_DIR=${CURRENT_DIR}/build
-TOOLCHAIN_DIR=${CURRENT_DIR}/toolchain
-TOOLS_DIR=${CURRENT_DIR}/tools
+TOOLCHAIN_DIR?=${CURRENT_DIR}/toolchain
 
 export TERM=xterm
 
@@ -45,7 +44,7 @@ default: build
 
 toolchain:
 
-	@if [ ! -f "${TOOLCHAIN_DIR}/.done" ]; then \
+	@if [ ! -f "${TOOLCHAIN_DIR}/llvm/build/bin/clang" ]; then \
 		mkdir -p ${TOOLCHAIN_DIR} && rm -rf ${TOOLCHAIN_DIR}/* && \
 		$(call msg,Building Cuda Toolchain  ...) && \
 		cd ${TOOLCHAIN_DIR} && \
