@@ -707,6 +707,7 @@ protected:
         CHECK(CUDNN_EXECUTE_FUNC_S(cudnnFindConvolutionBackwardDataAlgorithm,
                 handle, weights_desc, descs[y], conv_desc, descs[x],
                 requested_algo_count, &returned_algo_count, perf.data()));
+       printf("------------------------------ nunmer %d : kind %d\n", returned_algo_count, pd->desc()->alg_kind);
         for (size_t i = 0; i < returned_algo_count; i++) {
             if (perf[i].status == CUDNN_STATUS_SUCCESS) {
                 switch (pd->desc()->alg_kind) {
