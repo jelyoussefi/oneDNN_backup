@@ -711,7 +711,7 @@ protected:
             if (perf[i].status == CUDNN_STATUS_SUCCESS) {
                 switch (pd->desc()->alg_kind) {
                     case dnnl_convolution_auto:
-                    	 printf("--- dnnl_convolution_auto -- %d\n", utils::one_of(perf[i].algo);
+                    	 printf("--- dnnl_convolution_auto -- %d\n", perf[i].algo);
                         if (utils::one_of(perf[i].algo,
                                     CUDNN_CONVOLUTION_BWD_DATA_ALGO_0,
                                     CUDNN_CONVOLUTION_BWD_DATA_ALGO_1)) {
@@ -725,14 +725,14 @@ protected:
                         }
                         break;
                     case dnnl_convolution_direct:
-                     	 printf("--- dnnl_convolution_direct -- %d\n", utils::one_of(perf[i].algo);
+                     	 printf("--- dnnl_convolution_direct -- %d\n", perf[i].algo);
                         if (!utils::one_of(perf[i].algo,
                                     CUDNN_CONVOLUTION_BWD_DATA_ALGO_0,
                                     CUDNN_CONVOLUTION_BWD_DATA_ALGO_1))
                             continue;
                         break;
                     case dnnl_convolution_winograd:
-                     	 printf("--- dnnl_convolution_winograd -- %d\n", utils::one_of(perf[i].algo);
+                     	 printf("--- dnnl_convolution_winograd -- %d\n", perf[i].algo);
                         if (!utils::one_of(perf[i].algo,
                                     CUDNN_CONVOLUTION_BWD_DATA_ALGO_WINOGRAD,
                                     CUDNN_CONVOLUTION_BWD_DATA_ALGO_WINOGRAD_NONFUSED))
