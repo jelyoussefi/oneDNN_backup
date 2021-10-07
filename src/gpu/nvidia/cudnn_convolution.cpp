@@ -86,20 +86,20 @@ status_t cudnn_convolution_fwd_t::execute_convolution(
             auto handle = cuda_stream->get_cudnn_handle();
 
             std::vector<void *> args;
-            args.push_back(ih.get_native_mem<sycl::backend::cuda>(x_acc));
-            args.push_back(ih.get_native_mem<sycl::backend::cuda>(weights_acc));
-            args.push_back(ih.get_native_mem<sycl::backend::cuda>(y_acc));
+            args.push_back(ih.get_native_mem<cl::sycl::backend::cuda>(x_acc));
+            args.push_back(ih.get_native_mem<cl::sycl::backend::cuda>(weights_acc));
+            args.push_back(ih.get_native_mem<cl::sycl::backend::cuda>(y_acc));
             args.push_back(
-                    with_bias ? ih.get_native_mem<sycl::backend::cuda>(*bias_acc) : nullptr);
-            args.push_back(with_scratchpad ? ih.get_native_mem<sycl::backend::cuda>(*scratch_acc)
+                    with_bias ? ih.get_native_mem<cl::sycl::backend::cuda>(*bias_acc) : nullptr);
+            args.push_back(with_scratchpad ? ih.get_native_mem<cl::sycl::backend::cuda>(*scratch_acc)
                                            : nullptr);
             args.push_back(pd()->impl_->using_transformed_filter()
-                            ? ih.get_native_mem<sycl::backend::cuda>(*filter_scratch_acc)
+                            ? ih.get_native_mem<cl::sycl::backend::cuda>(*filter_scratch_acc)
                             : nullptr);
             args.push_back(use_temp_dst ? ih.get_native_mem(*temp_dst_acc)
                                         : nullptr);
             args.push_back(use_temp_dst
-                            ? ih.get_native_mem<sycl::backend::cuda>(*temp_reorder_acc)
+                            ? ih.get_native_mem<cl::sycl::backend::cuda>(*temp_reorder_acc)
                             : nullptr);
             pd()->impl_->execute(handle, args);
         });
@@ -150,15 +150,15 @@ status_t cudnn_convolution_bwd_data_t::execute_convolution(
             auto handle = cuda_stream->get_cudnn_handle();
 
             std::vector<void *> args;
-            args.push_back(ih.get_native_mem<sycl::backend::cuda>(x_acc));
-            args.push_back(ih.get_native_mem<sycl::backend::cuda>(weights_acc));
-            args.push_back(ih.get_native_mem<sycl::backend::cuda>(y_acc));
+            args.push_back(ih.get_native_mem<cl::sycl::backend::cuda>(x_acc));
+            args.push_back(ih.get_native_mem<cl::sycl::backend::cuda>(weights_acc));
+            args.push_back(ih.get_native_mem<cl::sycl::backend::cuda>(y_acc));
             args.push_back(
-                    with_bias ? ih.get_native_mem<sycl::backend::cuda>(*bias_acc) : nullptr);
-            args.push_back(with_scratchpad ? ih.get_native_mem<sycl::backend::cuda>(*scratch_acc)
+                    with_bias ? ih.get_native_mem<cl::sycl::backend::cuda>(*bias_acc) : nullptr);
+            args.push_back(with_scratchpad ? ih.get_native_mem<cl::sycl::backend::cuda>(*scratch_acc)
                                            : nullptr);
             args.push_back(pd()->impl_->using_transformed_filter()
-                            ? ih.get_native_mem<sycl::backend::cuda>(*filter_scratch_acc)
+                            ? ih.get_native_mem<cl::sycl::backend::cuda>(*filter_scratch_acc)
                             : nullptr);
             pd()->impl_->execute(handle, args);
         });
@@ -185,9 +185,9 @@ status_t cudnn_convolution_bwd_weights_t::execute_zero_dims(
             auto sc = cuda_sycl_scoped_context_handler_t(sycl_engine);
             auto handle = cuda_stream->get_cudnn_handle();
 
-            auto weights = ih.get_native_mem<sycl::backend::cuda>(weights_acc);
+            auto weights = ih.get_native_mem<cl::sycl::backend::cuda>(weights_acc);
             void *bias = nullptr;
-            if (pd()->with_bias()) bias = ih.get_native_mem<sycl::backend::cuda>(*bias_acc);
+            if (pd()->with_bias()) bias = ih.get_native_mem<cl::sycl::backend::cuda>(*bias_acc);
             pd()->impl_->execute_set_weights_bias(handle, weights, bias, 0.f);
         });
     });
@@ -237,15 +237,15 @@ status_t cudnn_convolution_bwd_weights_t::execute_convolution(
             auto handle = cuda_stream->get_cudnn_handle();
 
             std::vector<void *> args;
-            args.push_back(ih.get_native_mem<sycl::backend::cuda>(x_acc));
-            args.push_back(ih.get_native_mem<sycl::backend::cuda>(weights_acc));
-            args.push_back(ih.get_native_mem<sycl::backend::cuda>(y_acc));
+            args.push_back(ih.get_native_mem<cl::sycl::backend::cuda>(x_acc));
+            args.push_back(ih.get_native_mem<cl::sycl::backend::cuda>(weights_acc));
+            args.push_back(ih.get_native_mem<cl::sycl::backend::cuda>(y_acc));
             args.push_back(
-                    with_bias ? ih.get_native_mem<sycl::backend::cuda>(*bias_acc) : nullptr);
-            args.push_back(with_scratchpad ? ih.get_native_mem<sycl::backend::cuda>(*scratch_acc)
+                    with_bias ? ih.get_native_mem<cl::sycl::backend::cuda>(*bias_acc) : nullptr);
+            args.push_back(with_scratchpad ? ih.get_native_mem<cl::sycl::backend::cuda>(*scratch_acc)
                                            : nullptr);
             args.push_back(pd()->impl_->using_transformed_filter()
-                            ? ih.get_native_mem<sycl::backend::cuda>(*filter_scratch_acc)
+                            ? ih.get_native_mem<cl::sycl::backend::cuda>(*filter_scratch_acc)
                             : nullptr);
             pd()->impl_->execute(handle, args);
         });
