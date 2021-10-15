@@ -575,15 +575,15 @@ public:
         CHECK(CUDNN_EXECUTE_FUNC_S(cudnnGetConvolutionForwardAlgorithmMaxCount,
                 handle, &requested_algo_count));
         perf.resize(requested_algo_count);
-        CHECK(CUDNN_EXECUTE_FUNC_S(cudnnFindConvolutionForwardAlgorithm, handle,
+        CHECK(CUDNN_EXECUTE_FUNC_S(cudnnGetConvolutionForwardAlgorithm_v7, handle,
                 descs[x], weights_desc, conv_desc, descs[y],
                 requested_algo_count, &returned_algo_count, perf.data()));
-        std::cout<<"------------------------------ nunmer "<< returned_algo_count<< " : "<< pd->desc()->alg_kind<<std::endl;
+
         auto submit_status = CUDNN_STATUS_NOT_SUPPORTED;
         for (size_t i = 0; i < returned_algo_count; i++) {
             submit_status = perf[i].status;
             if (submit_status == CUDNN_STATUS_SUCCESS) {
-                // cudnnFindConvolutionForwardAlgorithm can erroneously report
+                // cudnnGetConvolutionForwardAlgorithm_v7 can erroneously report
                 // algorithms for int8 which does not work so ensure that we
                 // only allow CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_PRECOMP_GEMM
                 // in this case.
@@ -594,7 +594,6 @@ public:
                 }
                 switch (pd->desc()->alg_kind) {
                     case dnnl_convolution_auto:
-                                         	 std::cout<<"--- dnnl_convolution_auto -- "<< perf[i].algo <<std::endl;
                         if (utils::one_of(perf[i].algo,
                                     CUDNN_CONVOLUTION_FWD_ALGO_GEMM,
                                     CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM,
@@ -607,7 +606,6 @@ public:
                         }
                         break;
                     case dnnl_convolution_direct:
-                                         	 std::cout<<"--- dnnl_convolution_direct -- "<< perf[i].algo <<std::endl;
                         if (!utils::one_of(perf[i].algo,
                                     CUDNN_CONVOLUTION_FWD_ALGO_GEMM,
                                     CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM,
@@ -615,7 +613,6 @@ public:
                             continue;
                         break;
                     case dnnl_convolution_winograd:
-                                         	 std::cout<<"--- dnnl_convolution_winograd -- "<< perf[i].algo <<std::endl;
                         if (!utils::one_of(perf[i].algo,
                                     CUDNN_CONVOLUTION_FWD_ALGO_WINOGRAD,
                                     CUDNN_CONVOLUTION_FWD_ALGO_WINOGRAD_NONFUSED))
@@ -710,12 +707,10 @@ protected:
         CHECK(CUDNN_EXECUTE_FUNC_S(cudnnFindConvolutionBackwardDataAlgorithm,
                 handle, weights_desc, descs[y], conv_desc, descs[x],
                 requested_algo_count, &returned_algo_count, perf.data()));
-       printf("------------------------------ nunmer %d : kind %d\n", returned_algo_count, pd->desc()->alg_kind);
         for (size_t i = 0; i < returned_algo_count; i++) {
             if (perf[i].status == CUDNN_STATUS_SUCCESS) {
                 switch (pd->desc()->alg_kind) {
                     case dnnl_convolution_auto:
-                    	 printf("--- dnnl_convolution_auto -- %d\n", perf[i].algo);
                         if (utils::one_of(perf[i].algo,
                                     CUDNN_CONVOLUTION_BWD_DATA_ALGO_0,
                                     CUDNN_CONVOLUTION_BWD_DATA_ALGO_1)) {
@@ -729,14 +724,12 @@ protected:
                         }
                         break;
                     case dnnl_convolution_direct:
-                     	 printf("--- dnnl_convolution_direct -- %d\n", perf[i].algo);
                         if (!utils::one_of(perf[i].algo,
                                     CUDNN_CONVOLUTION_BWD_DATA_ALGO_0,
                                     CUDNN_CONVOLUTION_BWD_DATA_ALGO_1))
                             continue;
                         break;
                     case dnnl_convolution_winograd:
-                     	 printf("--- dnnl_convolution_winograd -- %d\n", perf[i].algo);
                         if (!utils::one_of(perf[i].algo,
                                     CUDNN_CONVOLUTION_BWD_DATA_ALGO_WINOGRAD,
                                     CUDNN_CONVOLUTION_BWD_DATA_ALGO_WINOGRAD_NONFUSED))
@@ -856,12 +849,10 @@ public:
         CHECK(CUDNN_EXECUTE_FUNC_S(cudnnFindConvolutionBackwardFilterAlgorithm,
                 handle, descs[x], descs[y], conv_desc, weights_desc,
                 requested_algo_count, &returned_algo_count, perf.data()));
-        std::cout<<"------------------------------ nunmer "<< returned_algo_count<< " : "<< pd->desc()->alg_kind<<std::endl;
         for (size_t i = 0; i < returned_algo_count; i++) {
             if (perf[i].status == CUDNN_STATUS_SUCCESS) {
                 switch (pd->desc()->alg_kind) {
                     case dnnl_convolution_auto:
-                     	 std::cout<<"--- dnnl_convolution_auto -- "<< perf[i].algo <<std::endl;
                         if (utils::one_of(perf[i].algo,
                                     CUDNN_CONVOLUTION_BWD_FILTER_ALGO_0,
                                     CUDNN_CONVOLUTION_BWD_FILTER_ALGO_1,
@@ -876,7 +867,6 @@ public:
                         }
                         break;
                     case dnnl_convolution_direct:
-                        std::cout<<"--- dnnl_convolution_direct -- "<< perf[i].algo <<std::endl;
                         if (!utils::one_of(perf[i].algo,
                                     CUDNN_CONVOLUTION_BWD_FILTER_ALGO_0,
                                     CUDNN_CONVOLUTION_BWD_FILTER_ALGO_1,
@@ -884,7 +874,6 @@ public:
                             continue;
                         break;
                     case dnnl_convolution_winograd:
-                    	 std::cout<<"--- dnnl_convolution_winograd -- "<< perf[i].algo <<std::endl;
                         if (!utils::one_of(perf[i].algo,
                                     CUDNN_CONVOLUTION_BWD_FILTER_ALGO_WINOGRAD,
                                     CUDNN_CONVOLUTION_BWD_FILTER_ALGO_WINOGRAD_NONFUSED))
