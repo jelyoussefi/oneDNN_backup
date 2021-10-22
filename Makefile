@@ -33,11 +33,6 @@ TOOLCHAIN_FLAGS = --cuda --cmake-opt=-DCMAKE_PREFIX_PATH="/usr/local/cuda/lib64/
 
 endif
 
-INSTALL_CMD=apt
-ifneq ($(shell which zypper 2>/dev/null ),)
-INSTALL_CMD=zypper
-endif
-
 CXX_COMPILER=${TOOLCHAIN_DIR}/llvm/build/bin/clang++
 CXX_FLAGS="-fsycl -fopenmp -O3  "
 
@@ -47,18 +42,22 @@ CXX_FLAGS="-fsycl -fopenmp -O3  "
 default: build 
 .PHONY: build
 
+
 toolchain:
+ifneq ($(shell which apt 2>/dev/null ),)
+	@apt install -y ninja-build
+else ifneq ($(shell which zypper),)
+	@zypper install -y ninja
+endif
 
 	@if [ ! -f "${TOOLCHAIN_DIR}/llvm/build/bin/clang" ]; then \
+		$(call msg,Building Cuda Toolchain  ...)  && \
 		mkdir -p ${TOOLCHAIN_DIR} && rm -rf ${TOOLCHAIN_DIR}/* && \
-		$(call msg,Building Cuda Toolchain  ...) && \
 		cd ${TOOLCHAIN_DIR} && \
-			sudo ${INSTALL_CMD} install -y ninja && \
 			git clone https://github.com/intel/llvm -b sycl && \
 			cd llvm && \
 				python ./buildbot/configure.py   ${TOOLCHAIN_FLAGS} && \
-				python ./buildbot/compile.py && \
-		touch ${TOOLCHAIN_DIR}/.done; \
+				python ./buildbot/compile.py; \
 	fi
 
 
