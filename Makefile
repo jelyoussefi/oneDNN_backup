@@ -9,7 +9,7 @@ TOOLCHAIN_DIR?=${CURRENT_DIR}/toolchain
 
 export TERM=xterm
 
-CUDA ?= ON
+CUDA ?= OFF
 
 CMAKE_FLAGS = 	-DDNNL_LIBRARY_TYPE=SHARED \
       		-DCMAKE_BUILD_TYPE=release \
@@ -33,6 +33,11 @@ TOOLCHAIN_FLAGS = --cuda --cmake-opt=-DCMAKE_PREFIX_PATH="/usr/local/cuda/lib64/
 
 endif
 
+INSTALL_CMD=apt
+ifneq ($(shell which zypper 2>/dev/null ),)
+INSTALL_CMD=zypper
+endif
+
 CXX_COMPILER=${TOOLCHAIN_DIR}/llvm/build/bin/clang++
 CXX_FLAGS="-fsycl -fopenmp -O3  "
 
@@ -48,7 +53,7 @@ toolchain:
 		mkdir -p ${TOOLCHAIN_DIR} && rm -rf ${TOOLCHAIN_DIR}/* && \
 		$(call msg,Building Cuda Toolchain  ...) && \
 		cd ${TOOLCHAIN_DIR} && \
-			dpkg -l ninja-build  > /dev/null 2>&1  || sudo apt install -y ninja-build && \
+			sudo ${INSTALL_CMD} install -y ninja && \
 			git clone https://github.com/intel/llvm -b sycl && \
 			cd llvm && \
 				python ./buildbot/configure.py   ${TOOLCHAIN_FLAGS} && \
@@ -77,7 +82,30 @@ clean:
 
 distclean: clean
 	@rm -rf ${TOOLCHAIN_DIR}
-	
+
+
+#----------------------------------------------------------------------------------------------------------------------
+# Docker
+#----------------------------------------------------------------------------------------------------------------------
+DOCKER_FILE = Dockerfile
+DOCKER_IMAGE_NAME = mammo-poc
+DOCKER_RUN_FLAGS=--privileged -v /dev:/dev 
+
+ifeq ($(CUDA),ON)
+	DOCKER_FILE := ${DOCKER_FILE}-cuda
+	DOCKER_IMAGE_NAME:=${DOCKER_IMAGE_NAME}-cuda
+	DOCKER_RUN_FLAGS = --env CUDA=ON --gpus all
+endif
+
+DOCKER_BUILD_FLAGS:= --build-arg CUDA=${CUDA} 
+
+docker-build: 
+	@$(call msg, Building docker image ${DOCKER_IMAGE_NAME}  ...)
+	@docker build   -f ${DOCKER_FILE} ${DOCKER_BUILD_FLAGS} -t ${DOCKER_IMAGE_NAME} .
+
+docker-run:
+	@$(call msg, Running docker container for ${DOCKER_IMAGE_NAME} image  ...)
+	docker run -it -a stdout -a stderr --network=host ${DOCKER_RUN_FLAGS}  ${DOCKER_IMAGE_NAME} bash
 #----------------------------------------------------------------------------------------------------------------------
 # helper functions
 #----------------------------------------------------------------------------------------------------------------------
