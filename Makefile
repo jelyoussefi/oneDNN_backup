@@ -6,6 +6,7 @@ SHELL:=/bin/bash
 CURRENT_DIR:=$(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
 BUILD_DIR=${CURRENT_DIR}/build
 TOOLCHAIN_DIR?=${CURRENT_DIR}/toolchain
+LLVM_SYCL_TAG?=2021-WW40
 
 export TERM=xterm
 
@@ -45,9 +46,9 @@ default: build
 
 toolchain:
 ifneq ($(shell which apt 2>/dev/null ),)
-	@apt install -y ninja-build
+	@sudo apt install -y ninja-build
 else ifneq ($(shell which zypper),)
-	@zypper install -y ninja
+	@sudo zypper install -y ninja
 endif
 
 	@if [ ! -f "${TOOLCHAIN_DIR}/llvm/build/bin/clang" ]; then \
@@ -56,6 +57,7 @@ endif
 		cd ${TOOLCHAIN_DIR} && \
 			git clone https://github.com/intel/llvm -b sycl && \
 			cd llvm && \
+				git checkout ${LLVM_SYCL_TAG} && \
 				python ./buildbot/configure.py   ${TOOLCHAIN_FLAGS} && \
 				python ./buildbot/compile.py; \
 	fi
