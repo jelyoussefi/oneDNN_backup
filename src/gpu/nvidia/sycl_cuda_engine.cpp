@@ -69,7 +69,6 @@ sycl_cuda_engine_t::sycl_cuda_engine_t(engine_kind_t kind,
     : base_t(kind, dev, ctx, index) {
     underlying_context_type();
     set_cudnn_handle();
-    set_cublas_handle();
 }
 
 sycl_cuda_engine_t::sycl_cuda_engine_t(
@@ -127,14 +126,25 @@ status_t sycl_cuda_engine_t::underlying_context_type() {
     // this is a costly function which take avarage up to 75ms
     // on titanrx. So we must run it once and store the variable
     // in  is_primary_context_;
-    CUcontext primary;
+    CUcontext primary,current;
     CUcontext desired
             = cl::sycl::get_native<cl::sycl::backend::cuda>(context());
     CUdevice cuda_device
             = cl::sycl::get_native<cl::sycl::backend::cuda>(device());
-    CHECK(CUDA_EXECUTE_FUNC_S(cuDevicePrimaryCtxRetain, &primary, cuda_device));
-    CHECK(CUDA_EXECUTE_FUNC_S(cuDevicePrimaryCtxRelease, cuda_device));
-    primary_context_ = (primary == desired);
+    CHECK(CUDA_EXECUTE_FUNC_S(cuCtxGetCurrent, &current));
+
+    unsigned int flags;
+    int is_primary_active;
+    CHECK(CUDA_EXECUTE_FUNC_S(cuDevicePrimaryCtxGetState, cuda_device, &flags, &is_primary_active));
+
+    if ( current == desired || is_primary_active ) {
+        primary_context_ =  (current == desired) ? (is_primary_active==1) : false;
+    }
+    else {
+        CHECK(CUDA_EXECUTE_FUNC_S(cuDevicePrimaryCtxRetain, &primary, cuda_device));
+        CHECK(CUDA_EXECUTE_FUNC_S(cuDevicePrimaryCtxRelease, cuda_device));
+        primary_context_ = (primary == desired);
+    }
     return status::success;
 }
 
