@@ -38,12 +38,12 @@ status_t cudnn_eltwise_fwd_t::execute(const exec_ctx_t &ctx) const {
 
 
     return cuda_stream->interop_task([&](cl::sycl::handler &cgh) {
-        buffer_u8_t buf(1);
+        sycl::buffer_u8_t buf(1);
         bool src_usm = CTX_IN_IS_USM(DNNL_ARG_SRC);
         bool dst_usm = CTX_OUT_IS_USM(DNNL_ARG_DST);
 
-        auto src_acc = !src_usm ? CTX_IN_ACCESSOR(DNNL_ARG_SRC) : buf.get_access<sycl::access::mode::read>(cgh);
-        auto dst_acc = !dst_usm ? CTX_OUT_ACCESSOR(DNNL_ARG_DST) : buf.get_access<sycl::access::mode::write>(cgh);
+        auto src_acc = !src_usm ? CTX_IN_ACCESSOR(DNNL_ARG_SRC) : buf.get_access<cl::sycl::access::mode::read>(cgh);
+        auto dst_acc = !dst_usm ? CTX_OUT_ACCESSOR(DNNL_ARG_DST) : buf.get_access<cl::sycl::access::mode::write>(cgh);
 
         printf("==============OK")
         cgh.host_task([=](const cl::sycl::interop_handle &ih) {
