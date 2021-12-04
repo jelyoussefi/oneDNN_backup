@@ -38,7 +38,7 @@ status_t cudnn_eltwise_fwd_t::execute(const exec_ctx_t &ctx) const {
 
 
     return cuda_stream->interop_task([&](cl::sycl::handler &cgh) {
-        auto buf = sycl::buffer<void, 1>(1);
+        buffer_u8_t buf(1);
         bool src_usm = CTX_IN_IS_USM(DNNL_ARG_SRC);
         bool dst_usm = CTX_OUT_IS_USM(DNNL_ARG_DST);
 
