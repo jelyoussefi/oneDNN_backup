@@ -33,8 +33,11 @@ status_t cudnn_eltwise_fwd_t::execute(const exec_ctx_t &ctx) const {
             = utils::downcast<nvidia::sycl_cuda_stream_t *>(ctx.stream());
 
     return cuda_stream->interop_task([&](cl::sycl::handler &cgh) {
-        auto src_acc = CTX_IN_ACCESSOR(DNNL_ARG_SRC);
-        auto dst_acc = CTX_OUT_ACCESSOR(DNNL_ARG_DST);
+    
+        void* src = CTX_IN_IS_USM(DNNL_ARG_SRC) ? 
+                CTX_IN_USM_PTR(DNNL_ARG_SRC) : sc.memory<void *>(ih, CTX_IN_ACCESSOR(DNNL_ARG_SRC));
+        void* dst = CTX_OUT_IS_USM(DNNL_ARG_DST) ? 
+                CTX_OUT_USM_PTR(DNNL_ARG_DST) : sc.memory<void *>(ih, CTX_OUT_ACCESSOR(DNNL_ARG_DST));
 
         cgh.host_task([=](const cl::sycl::interop_handle &ih) {
             std::vector<void *> args;
@@ -43,8 +46,8 @@ status_t cudnn_eltwise_fwd_t::execute(const exec_ctx_t &ctx) const {
             auto sc = cuda_sycl_scoped_context_handler_t(sycl_engine);
             auto handle = cuda_stream->get_cudnn_handle();
 
-            args.push_back(sc.memory<void *>(ih, src_acc));
-            args.push_back(sc.memory<void *>(ih, dst_acc));
+            args.push_back(src);
+            args.push_back(dst);
 
             pd()->eltwise_fwd_impl_->execute(handle, args.data(), args.size());
         });
@@ -55,6 +58,7 @@ status_t cudnn_eltwise_bwd_t::execute(const exec_ctx_t &ctx) const {
     if (memory_desc_wrapper(pd()->src_md()).has_zero_dim())
         return status::success;
 
+ 
     nvidia::sycl_cuda_stream_t *cuda_stream
             = utils::downcast<nvidia::sycl_cuda_stream_t *>(ctx.stream());
 

@@ -6,6 +6,7 @@ SHELL:=/bin/bash
 CURRENT_DIR:=$(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
 BUILD_DIR=${CURRENT_DIR}/build
 TOOLCHAIN_DIR?=${CURRENT_DIR}/toolchain
+ONEAPI_ROOT ?= /opt/intel/oneapi
 LLVM_SYCL_TAG?=2021-WW40
 
 export TERM=xterm
@@ -17,6 +18,8 @@ CMAKE_FLAGS = 	-DDNNL_LIBRARY_TYPE=SHARED \
       		-DDNNL_CPU_RUNTIME=DPCPP \
       		-DDNNL_GPU_RUNTIME=DPCPP \
 		-DDNNL_BUILD_EXAMPLES=ON      
+		-DCMAKE_C_COMPILER=${TOOLCHAIN_DIR}/llvm/build/bin/clang \
+      		-DCMAKE_CXX_COMPILER=${TOOLCHAIN_DIR}/llvm/build/bin/clang++ \
 		
 ifeq ($(CUDA),ON)
 CMAKE_FLAGS := ${CMAKE_FLAGS} \
@@ -31,10 +34,14 @@ CMAKE_FLAGS := ${CMAKE_FLAGS} \
       		-DCUBLAS_LIBRARY=/usr/local/cuda/targets/x86_64-linux/lib/libcublas.so 
       		
 TOOLCHAIN_FLAGS = --cuda --cmake-opt=-DCMAKE_PREFIX_PATH="/usr/local/cuda/lib64/stubs/"
+CXX_COMPILER=${TOOLCHAIN_DIR}/llvm/build/bin/clang++
+else
+CXX_COMPILER=${ONEAPI_ROOT}/compiler/latest/linux/bin/dpcpp
+LD_LIBRARY_PATH=$(shell source ${ONEAPI_ROOT}/setvars.sh --force > \
+	/dev/null 2>&1 && env | grep ^LD_LIBRARY_PATH | awk -F"=" '{print $$2}')
 
 endif
 
-CXX_COMPILER=${TOOLCHAIN_DIR}/llvm/build/bin/clang++
 CXX_FLAGS="-fsycl -fopenmp -O3  "
 
 #----------------------------------------------------------------------------------------------------------------------
@@ -45,6 +52,7 @@ default: build
 
 
 toolchain:
+ifeq ($(CUDA),ON)
 ifneq ($(shell which apt 2>/dev/null ),)
 	@sudo apt install -y ninja-build
 else ifneq ($(shell which zypper),)
@@ -61,7 +69,7 @@ endif
 				python ./buildbot/configure.py   ${TOOLCHAIN_FLAGS} && \
 				python ./buildbot/compile.py; \
 	fi
-
+endif
 
 build: toolchain	
 	@$(call msg,Building oneDNN  ...)

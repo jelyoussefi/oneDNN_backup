@@ -53,6 +53,27 @@ namespace nvidia {
             ->buffer() \
             .get_access<cl::sycl::access::mode::read_write>(cgh)
 
+#define CTX_OUT_IS_USM(arg) \
+    utils::downcast<const sycl::sycl_memory_storage_base_t *>( \
+            &CTX_OUT_STORAGE(arg)) \
+            ->memory_kind() == sycl::memory_kind::usm;	
+
+#define CTX_IN_IS_USM(arg) \
+    utils::downcast<const sycl::sycl_memory_storage_base_t *>( \
+            &CTX_IN_STORAGE(arg)) \
+            ->memory_kind() == sycl::memory_kind::usm;	
+
+#define CTX_OUT_USM_PTR(arg) \
+    utils::downcast<sycl::sycl_usm_memory_storage_t *>( \
+            &CTX_OUT_STORAGE(arg)) \
+            ->usm_ptr()()
+            
+#define CTX_IN_USM_PTR(arg) \
+    utils::downcast<sycl::sycl_usm_memory_storage_t *>( \
+            &CTX_IN_STORAGE(arg)) \
+            ->usm_ptr()() 
+
+
 bool compare_cuda_devices(
         const cl::sycl::device &lhs, const cl::sycl::device &rhs);
 
