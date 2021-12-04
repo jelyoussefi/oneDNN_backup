@@ -45,7 +45,6 @@ status_t cudnn_eltwise_fwd_t::execute(const exec_ctx_t &ctx) const {
         auto src_acc = !src_usm ? CTX_IN_ACCESSOR(DNNL_ARG_SRC) : buf.get_access<cl::sycl::access::mode::read>(cgh);
         auto dst_acc = !dst_usm ? CTX_OUT_ACCESSOR(DNNL_ARG_DST) : buf.get_access<cl::sycl::access::mode::write>(cgh);
 
-        printf("==============OK");
         cgh.host_task([=](const cl::sycl::interop_handle &ih) {
             std::vector<void *> args;
             auto &sycl_engine = *utils::downcast<sycl_cuda_engine_t *>(
@@ -53,8 +52,8 @@ status_t cudnn_eltwise_fwd_t::execute(const exec_ctx_t &ctx) const {
             auto sc = cuda_sycl_scoped_context_handler_t(sycl_engine);
             auto handle = cuda_stream->get_cudnn_handle();
 
-            args.push_back(sc.memory<void *>(ih, src_acc));
-            args.push_back(sc.memory<void *>(ih, dst_acc));
+            args.push_back(src_usm ? CTX_IN_USM_PTR(DNNL_ARG_SRC) : sc.memory<void *>(ih, src_acc));
+            args.push_back(dst_usm ? CTX_OUT_USM_PTR(DNNL_ARG_DST) : sc.memory<void *>(ih, dst_acc));
 
             pd()->eltwise_fwd_impl_->execute(handle, args.data(), args.size());
         });
