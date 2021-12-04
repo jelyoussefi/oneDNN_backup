@@ -66,12 +66,12 @@ namespace nvidia {
 #define CTX_OUT_USM_PTR(arg) \
     utils::downcast<sycl::sycl_usm_memory_storage_t *>( \
             &CTX_OUT_STORAGE(arg)) \
-            ->usm_ptr()()
+            ->usm_ptr()
             
 #define CTX_IN_USM_PTR(arg) \
     utils::downcast<sycl::sycl_usm_memory_storage_t *>( \
             &CTX_IN_STORAGE(arg)) \
-            ->usm_ptr()() 
+            ->usm_ptr()
 
 
 bool compare_cuda_devices(
