@@ -42,7 +42,7 @@ LD_LIBRARY_PATH=$(shell source ${ONEAPI_ROOT}/setvars.sh --force > \
 
 endif
 
-CXX_FLAGS="-fsycl -fopenmp -O3  "
+CXX_FLAGS="-fsycl -fopenmp -O3 -g "
 
 #----------------------------------------------------------------------------------------------------------------------
 # Targets
@@ -65,7 +65,6 @@ endif
 		cd ${TOOLCHAIN_DIR} && \
 			git clone https://github.com/intel/llvm -b sycl && \
 			cd llvm && \
-				git checkout ${LLVM_SYCL_TAG} && \
 				python ./buildbot/configure.py   ${TOOLCHAIN_FLAGS} && \
 				python ./buildbot/compile.py; \
 	fi
