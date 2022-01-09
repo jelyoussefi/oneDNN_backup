@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
+#include <memory>
 #include <numeric>
 #include <string>
 
@@ -53,6 +54,13 @@
     HANDLE_IR_OBJECT(stmt_seq_t) \
     HANDLE_IR_OBJECT(store_t)
 
+#define HANDLE_MUTATE_TARGETS() \
+    HANDLE_EXPR_IR_OBJECTS() \
+    HANDLE_STMT_IR_OBJECTS() \
+    HANDLE_IR_OBJECT(func_impl_t) \
+    HANDLE_IR_OBJECT(nary_op_t) \
+    HANDLE_IR_OBJECT(pexpr_t)
+
 #define HANDLE_ALL_IR_OBJECTS() \
     HANDLE_EXPR_IR_OBJECTS() \
     HANDLE_STMT_IR_OBJECTS() \
@@ -73,7 +81,8 @@ enum ir_type_id_t {
     expr_impl_t = end_visitable_ir_objects,
     nary_op_t,
     stmt_impl_t,
-    grf_alloc_attr_t,
+    grf_permute_attr_t,
+    bank_conflict_attr_t,
     instruction_modifier_attr_t,
     builtin_t,
     pexpr_t,
@@ -110,6 +119,13 @@ enum ir_type_id_t {
 #define IR_DECL_STMT_TYPE_ID(class_name) \
     IR_DECL_TYPE_ID(class_name) \
     bool is_stmt() const override { return true; }
+
+#define IR_DECL_MUTATE(mutator_template) \
+    object_t _mutate(mutator_template &mutator) const override { \
+        return mutator._mutate(*this); \
+    }
+
+#define IR_DECLARE_TRAVERSERS() IR_DECL_MUTATE(ir_mutator_t)
 
 // Defines getter for a function argument.
 #define IR_DEFINE_ARG_GET(name, index) \
@@ -262,6 +278,46 @@ public:
         return undef();
     }
 
+    template <typename T>
+    T max() const {
+        switch (kind()) {
+            case type_kind_t::u8:
+            case type_kind_t::s8:
+            case type_kind_t::u16:
+            case type_kind_t::s16:
+            case type_kind_t::u32:
+            case type_kind_t::s32:
+            case type_kind_t::u64:
+            case type_kind_t::s64: {
+                int bits = 8 * size();
+                if (is_signed()) bits--;
+                T ret = T(1) << (bits - 1);
+                return ret + (ret - 1);
+            }
+            default: ir_error_not_expected();
+        }
+        return 0;
+    }
+
+    template <typename T>
+    T min() const {
+        switch (kind()) {
+            case type_kind_t::u8:
+            case type_kind_t::s8:
+            case type_kind_t::u16:
+            case type_kind_t::s16:
+            case type_kind_t::u32:
+            case type_kind_t::s32:
+            case type_kind_t::u64:
+            case type_kind_t::s64: {
+                if (is_unsigned()) return 0;
+                return -max<T>() - 1;
+            }
+            default: ir_error_not_expected();
+        }
+        return 0;
+    }
+
     static bool is_vector(int elems) { return elems != 1; }
 
     type_t() : type_t(type_t::undef()) {}
@@ -341,6 +397,12 @@ public:
     bool is_u32() const { return kind() == type_kind_t::u32; }
     bool is_x32() const {
         return utils::one_of(kind(), type_kind_t::s32, type_kind_t::u32);
+    }
+
+    bool is_s64() const { return kind() == type_kind_t::s64; }
+    bool is_u64() const { return kind() == type_kind_t::u64; }
+    bool is_x64() const {
+        return utils::one_of(kind(), type_kind_t::s64, type_kind_t::u64);
     }
 
     bool is_signed(int elems = -1) const {
@@ -424,6 +486,13 @@ private:
     std::atomic<uint32_t> value_;
 };
 
+// Forward Declare IR objects
+class object_t;
+class ir_mutator_t;
+#define HANDLE_IR_OBJECT(type) class type;
+HANDLE_MUTATE_TARGETS()
+#undef HANDLE_IR_OBJECT
+
 // Base class for all IR objects. Implemented as an intrusive pointer, with
 // the reference counter stored inside the object.
 class object_impl_t {
@@ -487,6 +556,7 @@ public:
 
     virtual std::string str() const;
 
+    virtual object_t _mutate(ir_mutator_t &mutator) const;
     IR_DEFINE_DUMP()
 
 private:
@@ -665,6 +735,36 @@ template <typename KeyT, typename ValueT>
 using object_eq_map_t
         = std::unordered_map<KeyT, ValueT, object_eq_hash_t, object_eq_equal_t>;
 
+// Helper class to mutate IR tree.
+class ir_mutator_t {
+public:
+    virtual ~ir_mutator_t() = default;
+
+    object_t mutate(const object_t &obj) {
+        auto impl = obj.impl();
+        if (!impl) return impl;
+        return impl->_mutate(*this);
+    }
+
+    template <typename T>
+    std::vector<T> mutate(const std::vector<T> &v) {
+        std::vector<T> new_v;
+        for (auto &e : v)
+            new_v.push_back(mutate(e));
+        return new_v;
+    }
+
+    // To catch missing _mutate() handlers in ir_mutator_t.
+    object_t _mutate(const object_impl_t &obj) {
+        ir_error_not_expected() << "Can't handle type: " << object_t(&obj);
+        return {};
+    }
+
+#define HANDLE_IR_OBJECT(type) virtual object_t _mutate(const type &obj);
+    HANDLE_MUTATE_TARGETS()
+#undef HANDLE_IR_OBJECT
+};
+
 // Base class for IR expression objects.
 class expr_impl_t : public object_impl_t {
 public:
@@ -732,6 +832,7 @@ private:
 // Helper functions.
 inline bool is_const(const expr_t &e);
 inline bool is_var(const expr_t &e);
+inline bool all_of(const expr_t &e, const expr_t &value);
 
 // Unary and binary operators.
 enum class op_kind_t {
@@ -757,6 +858,7 @@ enum class op_kind_t {
 
     _and,
 
+    _prelu, // binary relu(a, b)
     _add3, // a + b + c
     _mad, // a + b * c
 };
@@ -808,6 +910,8 @@ public:
         return ir_utils::get_hash(op_kind, a, b);
     }
 
+    IR_DECLARE_TRAVERSERS()
+
     op_kind_t op_kind;
     expr_t a;
     expr_t b;
@@ -837,19 +941,34 @@ public:
 
     size_t get_hash() const override { return ir_utils::get_hash(value); }
 
+    IR_DECLARE_TRAVERSERS()
+
     bool value;
 
 private:
     bool_imm_t(bool value) : expr_impl_t(type_t::_bool()), value(value) {}
 };
 
-// Cast between data types.
+// Cast between data types. In general conversion follows the C++ casting
+// rules. Several modes/scenarios are supported:
+// - Cast with saturation: cast(T, e) = max(T_min, min(T_max, e))
+//   By default saturation is disabled and any underflow/overflow is unhandled.
+// - Bitwise cast from bool vector to u16 (boolxN -> u16, 2 <= N <= 16):
+//   In this case the lower N bits of the resulting value are initialized based
+//   on the boolean elements. The upper (16 - N) bits are uninitialized.
 class cast_t : public expr_impl_t {
 public:
     IR_DECL_EXPR_TYPE_ID(cast_t)
 
     static expr_t make(
             const type_t &type, const expr_t &expr, bool saturate = false) {
+        if (expr.type() == type) return expr;
+        if (!saturate) {
+            auto *expr_cast = expr.as_ptr<cast_t>();
+            if (expr_cast && !expr_cast->saturate
+                    && type == expr_cast->expr.type())
+                return expr_cast->expr;
+        }
         return expr_t(new cast_t(type, expr, saturate));
     }
 
@@ -865,14 +984,32 @@ public:
         return ir_utils::get_hash(type, expr, saturate);
     }
 
+    bool is_bool_vec_u16() const {
+        if (is_bool_vec(expr.type()) && is_u16_scalar(type)) return true;
+        if (is_bool_vec(type) && is_u16_scalar(expr.type())) return true;
+        return false;
+    }
+
+    IR_DECLARE_TRAVERSERS()
+
     expr_t expr;
     bool saturate;
 
 private:
     cast_t(const type_t &type, const expr_t &expr, bool saturate)
         : expr_impl_t(type), expr(expr), saturate(saturate) {
-        ir_assert(type.elems() == expr.type().elems())
-                << "Number of elements must match.";
+        if (!is_bool_vec_u16()) {
+            ir_assert(type.elems() == expr.type().elems())
+                    << "Number of elements must match.";
+        }
+    }
+
+    static bool is_bool_vec(const type_t &type) {
+        return type.is_bool() && type.elems() > 1;
+    }
+
+    static bool is_u16_scalar(const type_t &type) {
+        return type.is_u16() && type.is_scalar();
     }
 };
 
@@ -892,6 +1029,8 @@ public:
     }
 
     size_t get_hash() const override { return ir_utils::get_hash(value); }
+
+    IR_DECLARE_TRAVERSERS()
 
     float value;
 
@@ -921,6 +1060,8 @@ public:
     size_t get_hash() const override {
         return ir_utils::get_hash(cond, true_expr, false_expr);
     }
+
+    IR_DECLARE_TRAVERSERS()
 
     expr_t cond;
     expr_t true_expr;
@@ -969,6 +1110,8 @@ public:
         return false;
     }
 
+    IR_DECLARE_TRAVERSERS()
+
     int64_t value;
 
 private:
@@ -1000,8 +1143,7 @@ public:
     IR_DECL_EXPR_TYPE_ID(load_t)
 
     // offset and stride are expressed in bytes.
-    // default stride means unit stride (in terms of value.type().scalar()
-    // elements).
+    // default stride means unit stride (in terms of type.scalar() elements).
     static expr_t make(const type_t &type, const expr_t &buf, const expr_t &off,
             int stride = default_stride) {
         return expr_t(new load_t(type, buf, off, stride));
@@ -1020,6 +1162,8 @@ public:
     }
 
     bool has_default_stride() const { return stride == default_stride; }
+
+    IR_DECLARE_TRAVERSERS()
 
     static const int default_stride = -1;
 
@@ -1071,6 +1215,8 @@ public:
         return oss.str();
     }
 
+    IR_DECLARE_TRAVERSERS()
+
     op_kind_t op_kind;
     std::vector<expr_t> args;
 
@@ -1107,6 +1253,8 @@ public:
     //     After call:  base = base0, off = off0 + off1
     static void normalize(
             expr_t &base, expr_t &off, op_kind_t op_kind = op_kind_t::_add);
+
+    IR_DECLARE_TRAVERSERS()
 
     expr_t base;
     expr_t off;
@@ -1198,6 +1346,8 @@ public:
 
     bool is_broadcast() const { return vec.size() == 1; }
 
+    IR_DECLARE_TRAVERSERS()
+
     std::vector<expr_t> vec;
     std::vector<int> idx;
 
@@ -1248,6 +1398,8 @@ public:
         return ir_utils::get_hash(op_kind, a, b, c);
     }
 
+    IR_DECLARE_TRAVERSERS()
+
     op_kind_t op_kind;
     expr_t a;
     expr_t b;
@@ -1289,6 +1441,8 @@ public:
 
     size_t get_hash() const override { return ir_utils::get_hash(op_kind, a); }
 
+    IR_DECLARE_TRAVERSERS()
+
     op_kind_t op_kind;
     expr_t a;
 
@@ -1311,6 +1465,8 @@ public:
     }
 
     size_t get_hash() const override { return ir_utils::get_hash(name); }
+
+    IR_DECLARE_TRAVERSERS()
 
     std::string name;
 
@@ -1362,6 +1518,15 @@ inline bool is_binary_cmp_op(const expr_t &e) {
 
 inline bool is_const(const expr_t &e) {
     return e.is<bool_imm_t>() || e.is<int_imm_t>() || e.is<float_imm_t>();
+}
+
+inline bool all_of(const expr_t &e, const expr_t &value) {
+    auto *shuffle = e.as_ptr<shuffle_t>();
+    if (!shuffle) return e.is_equal(value);
+    for (auto &i : shuffle->idx) {
+        if (!shuffle->vec[i].is_equal(value)) return false;
+    }
+    return true;
 }
 
 inline bool is_shuffle_const(const expr_t &e) {
@@ -1482,30 +1647,62 @@ private:
     }
 };
 
-// Allocation attribute for GRF.
-class grf_alloc_attr_t : public alloc_attr_impl_t {
-public:
-    IR_DECL_TYPE_ID(grf_alloc_attr_t)
+class grf_permutation_t;
 
-    static alloc_attr_t make(const ngen_proxy::Bundle &bundle) {
-        return alloc_attr_t(new grf_alloc_attr_t(bundle));
+// Allocation attribute specifying permutation for a GRF buffer.
+class grf_permute_attr_t : public alloc_attr_impl_t {
+public:
+    IR_DECL_TYPE_ID(grf_permute_attr_t)
+
+    static alloc_attr_t make(
+            const std::shared_ptr<grf_permutation_t> &grf_perm) {
+        return alloc_attr_t(new grf_permute_attr_t(grf_perm));
     }
 
     bool is_equal(const object_impl_t &obj) const override {
-        if (!obj.is<self_type>()) return false;
-        auto &other = obj.as<self_type>();
-
-        return bundle == other.bundle;
+        return this == &obj;
     }
 
     size_t get_hash() const override {
-        return ir_utils::get_hash(bundle.bundle_id, bundle.bank_id);
+        return std::hash<const self_type *>()(this);
     }
 
-    ngen_proxy::Bundle bundle;
+    std::shared_ptr<grf_permutation_t> grf_perm;
 
 private:
-    grf_alloc_attr_t(const ngen_proxy::Bundle &bundle) : bundle(bundle) {}
+    grf_permute_attr_t(const std::shared_ptr<grf_permutation_t> &grf_perm)
+        : grf_perm(grf_perm) {}
+};
+
+// Allocation attribute to store extra information to avoid bank conflicts.
+class bank_conflict_attr_t : public alloc_attr_impl_t {
+public:
+    IR_DECL_TYPE_ID(bank_conflict_attr_t)
+
+    static alloc_attr_t make(const std::vector<expr_t> &bufs,
+            const std::vector<int> &buf_sizes,
+            const std::vector<stmt_t> &instructions) {
+        return alloc_attr_t(
+                new bank_conflict_attr_t(bufs, buf_sizes, instructions));
+    }
+
+    bool is_equal(const object_impl_t &obj) const override {
+        return this == &obj;
+    }
+
+    size_t get_hash() const override {
+        return std::hash<const self_type *>()(this);
+    }
+
+    std::vector<expr_t> bufs;
+    std::vector<int> buf_sizes;
+    std::vector<stmt_t> instructions;
+
+private:
+    bank_conflict_attr_t(const std::vector<expr_t> &bufs,
+            const std::vector<int> &buf_sizes,
+            const std::vector<stmt_t> &instructions)
+        : bufs(bufs), buf_sizes(buf_sizes), instructions(instructions) {}
 };
 
 // Allocation for SLM and GRF buffers.
@@ -1519,8 +1716,19 @@ public:
     IR_DECL_STMT_TYPE_ID(alloc_t)
 
     static stmt_t make(const expr_t &buf, int size, alloc_kind_t kind,
-            const alloc_attr_t &attr = {}, const stmt_t &body = {}) {
-        return stmt_t(new alloc_t(buf, size, kind, attr, body));
+            const std::vector<alloc_attr_t> &attrs, const stmt_t &body = {}) {
+        return stmt_t(new alloc_t(buf, size, kind, attrs, body));
+    }
+
+    static stmt_t make(const expr_t &buf, int size, alloc_kind_t kind,
+            const alloc_attr_t &attr, const stmt_t &body = {}) {
+        std::vector<alloc_attr_t> attrs = {attr};
+        return make(buf, size, kind, attrs, body);
+    }
+
+    static stmt_t make(const expr_t &buf, int size, alloc_kind_t kind,
+            const stmt_t &body = {}) {
+        return make(buf, size, kind, std::vector<alloc_attr_t>(), body);
     }
 
     bool is_equal(const object_impl_t &obj) const override {
@@ -1528,24 +1736,42 @@ public:
         auto &other = obj.as<self_type>();
 
         return buf.is_equal(other.buf) && (size == other.size)
-                && (kind == other.kind) && attr.is_equal(other.attr)
+                && (kind == other.kind)
+                && ir_utils::is_equal(attrs, other.attrs)
                 && body.is_equal(other.body);
     }
 
     size_t get_hash() const override {
-        return ir_utils::get_hash(buf, size, kind, attr, body);
+        return ir_utils::get_hash(buf, size, kind, attrs, body);
     }
+
+    template <typename T>
+    bool has_attr() const {
+        for (auto &a : attrs)
+            if (a.is<T>()) return true;
+        return false;
+    }
+
+    template <typename T>
+    const T &get_attr() const {
+        for (auto &a : attrs)
+            if (a.is<T>()) return a.as<T>();
+        ir_error_not_expected() << "Can't find attribute.";
+        return attrs[0].as<T>();
+    }
+
+    IR_DECLARE_TRAVERSERS()
 
     expr_t buf;
     int size;
     alloc_kind_t kind;
-    alloc_attr_t attr;
+    std::vector<alloc_attr_t> attrs;
     stmt_t body;
 
 private:
     alloc_t(const expr_t &buf, int size, alloc_kind_t kind,
-            const alloc_attr_t &attr, const stmt_t &body)
-        : buf(buf), size(size), kind(kind), attr(attr), body(body) {
+            const std::vector<alloc_attr_t> &attrs, const stmt_t &body)
+        : buf(buf), size(size), kind(kind), attrs(attrs), body(body) {
         ir_assert(buf.type().is_ptr()) << buf;
     }
 };
@@ -1567,7 +1793,16 @@ public:
     // elements).
     static stmt_t make(const expr_t &buf, const expr_t &off,
             const expr_t &value, int stride = default_stride,
-            const expr_t &mask = expr_t()) {
+            const expr_t &_mask = expr_t()) {
+        auto mask = _mask;
+        if (!mask.is_empty()) {
+            if (all_of(mask, expr_t(true))) {
+                mask = expr_t();
+            } else if (all_of(mask, expr_t(false))) {
+                // No need to store anything with a false mask.
+                return stmt_t();
+            }
+        }
         return stmt_t(new store_t(buf, off, value, stride, mask));
     }
 
@@ -1585,6 +1820,8 @@ public:
     }
 
     bool has_default_stride() const { return stride == default_stride; }
+
+    IR_DECLARE_TRAVERSERS()
 
     static const int default_stride = -1;
 
@@ -1635,6 +1872,8 @@ public:
         return ir_utils::get_hash(var, init, bound, body, unroll);
     }
 
+    IR_DECLARE_TRAVERSERS()
+
     expr_t var;
     expr_t init;
     expr_t bound;
@@ -1675,6 +1914,8 @@ public:
         return ir_utils::get_hash(cond, body, else_body);
     }
 
+    IR_DECLARE_TRAVERSERS()
+
     expr_t cond;
     stmt_t body;
     stmt_t else_body;
@@ -1710,6 +1951,8 @@ public:
     size_t get_hash() const override {
         return ir_utils::get_hash(var, value, body);
     }
+
+    IR_DECLARE_TRAVERSERS()
 
     expr_t var;
     expr_t value;
@@ -1831,6 +2074,8 @@ public:
 
     size_t get_hash() const override { return ir_utils::get_hash(label, body); }
 
+    IR_DECLARE_TRAVERSERS()
+
     stmt_label_t label;
     stmt_t body;
 
@@ -1861,6 +2106,8 @@ public:
     }
 
     size_t get_hash() const override { return ir_utils::get_hash(head, tail); }
+
+    IR_DECLARE_TRAVERSERS()
 
     stmt_t head;
     stmt_t tail;
@@ -1954,6 +2201,8 @@ public:
 
     stmt_t call(const std::vector<expr_t> &args,
             const func_call_attr_t &attr = {}) const;
+
+    IR_DECLARE_TRAVERSERS()
 };
 
 // Wrapper for IR function objects.
@@ -2006,6 +2255,8 @@ public:
     size_t get_hash() const override {
         return ir_utils::get_hash(func, args, attr);
     }
+
+    IR_DECLARE_TRAVERSERS()
 
     func_t func;
     std::vector<expr_t> args;

@@ -34,6 +34,7 @@
 #include "gpu/nvidia/cudnn_pooling.hpp"
 #include "gpu/nvidia/cudnn_resampling.hpp"
 #include "gpu/nvidia/cudnn_softmax.hpp"
+#include "gpu/nvidia/sycl_cuda_compat.hpp"
 #include "gpu/nvidia/sycl_cuda_engine.hpp"
 #include "gpu/nvidia/sycl_cuda_scoped_context.hpp"
 #include "gpu/nvidia/sycl_cuda_stream.hpp"
@@ -43,16 +44,15 @@ namespace impl {
 namespace gpu {
 namespace nvidia {
 
-bool is_nvidia_gpu(const cl::sycl::device &dev) {
+bool is_nvidia_gpu(const ::sycl::device &dev) {
     constexpr int nvidia_vendor_id = 0x10DE;
     return dev.is_gpu()
-            && dev.get_info<cl::sycl::info::device::vendor_id>()
+            && dev.get_info<::sycl::info::device::vendor_id>()
             == nvidia_vendor_id;
 }
 
 status_t cuda_engine_create(engine_t **engine, engine_kind_t engine_kind,
-        const cl::sycl::device &dev, const cl::sycl::context &ctx,
-        size_t index) {
+        const ::sycl::device &dev, const ::sycl::context &ctx, size_t index) {
     CHECK(nvidia::check_device(engine_kind));
     std::unique_ptr<nvidia::sycl_cuda_engine_t, engine_deleter_t> cuda_engine(
             (new nvidia::sycl_cuda_engine_t(dev, ctx, index)));
@@ -65,14 +65,15 @@ status_t cuda_engine_create(engine_t **engine, engine_kind_t engine_kind,
 }
 
 sycl_cuda_engine_t::sycl_cuda_engine_t(engine_kind_t kind,
-        const cl::sycl::device &dev, const cl::sycl::context &ctx, size_t index)
+        const ::sycl::device &dev, const ::sycl::context &ctx, size_t index)
     : base_t(kind, dev, ctx, index) {
     underlying_context_type();
     set_cudnn_handle();
+    set_cublas_handle();
 }
 
 sycl_cuda_engine_t::sycl_cuda_engine_t(
-        const cl::sycl::device &dev, const cl::sycl::context &ctx, size_t index)
+        const ::sycl::device &dev, const ::sycl::context &ctx, size_t index)
     : sycl_cuda_engine_t(engine_kind::gpu, dev, ctx, index) {
     assert(is_nvidia_gpu(dev));
 }
@@ -110,7 +111,7 @@ status_t sycl_cuda_engine_t::set_cudnn_handle() {
 }
 
 CUcontext sycl_cuda_engine_t::get_underlying_context() const {
-    return cl::sycl::get_native<cl::sycl::backend::cuda>(context());
+    return compat::get_native<CUcontext>(context());
 }
 
 status_t sycl_cuda_engine_t::create_stream(stream_t **stream, unsigned flags) {
@@ -118,7 +119,7 @@ status_t sycl_cuda_engine_t::create_stream(stream_t **stream, unsigned flags) {
 }
 
 status_t sycl_cuda_engine_t::create_stream(
-        stream_t **stream, cl::sycl::queue &queue) {
+        stream_t **stream, ::sycl::queue &queue) {
     return sycl_cuda_stream_t::create_stream(stream, this, queue);
 }
 
@@ -127,10 +128,8 @@ status_t sycl_cuda_engine_t::underlying_context_type() {
     // on titanrx. So we must run it once and store the variable
     // in  is_primary_context_;
     CUcontext primary,current;
-    CUcontext desired
-            = cl::sycl::get_native<cl::sycl::backend::cuda>(context());
-    CUdevice cuda_device
-            = cl::sycl::get_native<cl::sycl::backend::cuda>(device());
+    CUcontext desired = compat::get_native<CUcontext>(context());
+    CUdevice cuda_device = compat::get_native<CUdevice>(device());
     CHECK(CUDA_EXECUTE_FUNC_S(cuCtxGetCurrent, &current));
 
     unsigned int flags;
@@ -160,8 +159,7 @@ cublasHandle_t *sycl_cuda_engine_t::get_cublas_handle() {
 
 device_id_t sycl_cuda_engine_t::device_id() const {
     return device_id_t(static_cast<int>(sycl::backend_t::nvidia),
-            static_cast<uint64_t>(
-                    cl::sycl::get_native<cl::sycl::backend::cuda>(device())),
+            static_cast<uint64_t>(compat::get_native<CUdevice>(device())),
             static_cast<uint64_t>(0));
 }
 
@@ -193,62 +191,59 @@ void sycl_cuda_engine_t::activate_stream_cudnn(stream_t *stream) {
 
 namespace {
 using namespace dnnl::impl::data_type;
-#define INSTANCE(...) \
-    impl_list_item_t( \
-            impl_list_item_t::type_deduction_helper_t<__VA_ARGS__::pd_t>())
+
 // clang-format off
 const dnnl::impl::impl_list_item_t sycl_cuda_impl_list[] = {
         // Elementwise
-        INSTANCE(cudnn_eltwise_fwd_t),
-        INSTANCE(cudnn_eltwise_bwd_t),
+        INSTANCE(cudnn_eltwise_fwd_t)
+        INSTANCE(cudnn_eltwise_bwd_t)
 
         // Deconvolution
-        INSTANCE(cudnn_deconvolution_fwd_t),
-        INSTANCE(cudnn_deconvolution_bwd_data_t),
-        INSTANCE(cudnn_deconvolution_bwd_weights_t),
+        INSTANCE(cudnn_deconvolution_fwd_t)
+        INSTANCE(cudnn_deconvolution_bwd_data_t)
+        INSTANCE(cudnn_deconvolution_bwd_weights_t)
 
         // Convolution
-        INSTANCE(cudnn_convolution_fwd_t),
-        INSTANCE(cudnn_convolution_bwd_data_t),
-        INSTANCE(cudnn_convolution_bwd_weights_t),
+        INSTANCE(cudnn_convolution_fwd_t)
+        INSTANCE(cudnn_convolution_bwd_data_t)
+        INSTANCE(cudnn_convolution_bwd_weights_t)
 
         // Batch Normalization
-        INSTANCE(cudnn_batch_normalization_fwd_t),
-        INSTANCE(cudnn_batch_normalization_bwd_t),
+        INSTANCE(cudnn_batch_normalization_fwd_t)
+        INSTANCE(cudnn_batch_normalization_bwd_t)
 
         // Pooling
-        INSTANCE(cudnn_pooling_fwd_t),
-        INSTANCE(cudnn_pooling_bwd_t),
+        INSTANCE(cudnn_pooling_fwd_t)
+        INSTANCE(cudnn_pooling_bwd_t)
 
         // LRN
-        INSTANCE(cudnn_lrn_fwd_t),
-        INSTANCE(cudnn_lrn_bwd_t),
+        INSTANCE(cudnn_lrn_fwd_t)
+        INSTANCE(cudnn_lrn_bwd_t)
 
         // Inner Product
-        INSTANCE(cudnn_gemm_inner_product_fwd_t),
-        INSTANCE(cudnn_conv_inner_product_fwd_t),
-        INSTANCE(cudnn_gemm_inner_product_bwd_data_t),
-        INSTANCE(cudnn_conv_inner_product_bwd_data_t),
-        INSTANCE(cudnn_gemm_inner_product_bwd_weights_t),
-        INSTANCE(cudnn_conv_inner_product_bwd_weights_t),
+        INSTANCE(cudnn_gemm_inner_product_fwd_t)
+        INSTANCE(cudnn_conv_inner_product_fwd_t)
+        INSTANCE(cudnn_gemm_inner_product_bwd_data_t)
+        INSTANCE(cudnn_conv_inner_product_bwd_data_t)
+        INSTANCE(cudnn_gemm_inner_product_bwd_weights_t)
+        INSTANCE(cudnn_conv_inner_product_bwd_weights_t)
 
         // Softmax
-        INSTANCE(cudnn_softmax_fwd_t),
-        INSTANCE(cudnn_softmax_bwd_t),
+        INSTANCE(cudnn_softmax_fwd_t)
+        INSTANCE(cudnn_softmax_bwd_t)
 
         // Binary
-        INSTANCE(cudnn_binary_t),
+        INSTANCE(cudnn_binary_t)
 
         // MatMul
-        INSTANCE(cudnn_matmul_t),
+        INSTANCE(cudnn_matmul_t)
 
         // Resampling
-        INSTANCE(cudnn_resampling_fwd_t),
-        INSTANCE(cudnn_resampling_bwd_t),
+        INSTANCE(cudnn_resampling_fwd_t)
+        INSTANCE(cudnn_resampling_bwd_t)
         nullptr,
 };
 // clang-format on
-#undef INSTANCE
 } // namespace
 const dnnl::impl::impl_list_item_t *sycl_cuda_engine_t::get_implementation_list(
         const op_desc_t *) const {

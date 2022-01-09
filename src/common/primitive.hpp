@@ -23,6 +23,7 @@
 #include "oneapi/dnnl/dnnl.h"
 
 #include "c_types_map.hpp"
+#include "cache_blob.hpp"
 #include "memory_storage.hpp"
 #include "memory_tracking.hpp"
 #include "primitive_desc.hpp"
@@ -46,16 +47,31 @@ struct primitive_t : public c_compatible {
 
     virtual status_t init(engine_t *engine) { return status::success; }
 
-    status_t init(engine_t *engine, bool use_global_scratchpad) {
+    status_t init(engine_t *engine, bool use_global_scratchpad,
+            const cache_blob_t &cache_blob) {
+        cache_blob_ = cache_blob;
         CHECK(init(engine));
         CHECK(init_cached_resource(engine));
         use_global_scratchpad_ = use_global_scratchpad;
+        // The `cache_blob_` is no longer needed after primitive creation.
+        cache_blob_ = cache_blob_t();
         return status::success;
     }
 
     const std::shared_ptr<primitive_desc_t> &pd() const { return pd_; }
     primitive_kind_t kind() const { return pd_->kind(); }
     virtual status_t execute(const exec_ctx_t &ctx) const = 0;
+
+    virtual status_t get_cache_blob(
+            engine_t *engine, cache_blob_t &cache_blob) const {
+        assert(!"unexpected");
+        return status::runtime_error;
+    }
+
+    virtual status_t get_cache_blob_size(size_t *size) const {
+        assert(!"unexpected");
+        return status::runtime_error;
+    }
 
     virtual status_t create_resource(
             engine_t *engine, resource_mapper_t &mapper) const {
@@ -80,12 +96,14 @@ struct primitive_t : public c_compatible {
     }
 
     bool use_global_scratchpad() const { return use_global_scratchpad_; }
+    cache_blob_t cache_blob() const { return cache_blob_; }
 
 protected:
     template <typename impl_type, typename pd_t>
     static status_t create_primitive_common(
             std::pair<std::shared_ptr<primitive_t>, bool> &primitive,
-            const pd_t *pd, engine_t *engine, bool use_global_scratchpad) {
+            const pd_t *pd, engine_t *engine, bool use_global_scratchpad,
+            const cache_blob_t &cache_blob) {
 
         auto &global_primitive_cache = primitive_cache();
         primitive_hashing::key_t key(pd, engine);
@@ -113,7 +131,7 @@ protected:
             // we have to create it and notify the waiting threads
             // once the creation is done.
             p = std::make_shared<impl_type>(pd);
-            status = p->init(engine, use_global_scratchpad);
+            status = p->init(engine, use_global_scratchpad, cache_blob);
             if (status != status::success) {
                 // Communicate an error.
                 p_promise.set_value({nullptr, status});
@@ -145,6 +163,7 @@ protected:
 
     std::shared_ptr<primitive_desc_t> pd_;
     bool use_global_scratchpad_;
+    cache_blob_t cache_blob_;
 
 private:
     primitive_t() = delete;
@@ -275,6 +294,9 @@ struct dnnl_primitive : public dnnl::impl::c_compatible {
     dnnl::impl::status_t init();
     dnnl::impl::engine_t *engine() const;
     const primitive_desc_iface_t *pd() const;
+    dnnl::impl::status_t get_cache_blob_size(size_t *size) const;
+    dnnl::impl::status_t get_cache_blob(
+            dnnl::impl::cache_blob_t cache_blob) const;
     dnnl::impl::status_t execute(dnnl::impl::exec_ctx_t &ctx) const;
 
     void retain() { counter_++; }

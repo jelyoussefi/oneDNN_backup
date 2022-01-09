@@ -458,6 +458,10 @@ public:
         return c_tg_tile_.create_sub_tensor(c_thr_tile_);
     }
 
+    int var_bound(const expr_t &var) const {
+        return to_cpp<int>(find_loop(var).bound());
+    }
+
     // Splits loop defined by `var` into two new loops based on `factor`.
     // Before:
     //     for (int var = 0; var < I; var++) { ... }
@@ -559,7 +563,7 @@ public:
                 << "Dimension size doesn't match.";
     }
 
-    // Reorders loops defiend by given variables.
+    // Reorders loops defined by given variables.
     void reorder(const std::vector<expr_t> &ordered_vars) {
         for (auto &v : ordered_vars) {
             auto &loop = find_loop(v);
@@ -581,6 +585,16 @@ public:
         }
     }
 
+    // Adds a skip condition to the loop defined by `var`:
+    //   for (var = 0; var < bound; var++) {
+    //      if (cond) continue;
+    //      ...
+    //   }
+    void set_skip_condition(const expr_t &var, const expr_t &cond) {
+        ir_assert(find_loop(var).is_leaf()) << "Variable is non-leaf: " << var;
+        skip_conditions_[var] = expand(cond);
+    }
+
     bool with_thread_group_k_slicing() const {
         ir_assert(is_finalized_);
         dim_t k_thr = 1;
@@ -596,24 +610,57 @@ public:
     }
 
     void finalize() {
-        sort_vars();
         init_problem_tiles();
         init_constraint_set();
         is_finalized_ = true;
     }
 
+    expr_t expand(const expr_t &e, bool expand_trivial_vars = true) const {
+        auto found_vars = find_unique_objects<var_t>(e);
+        auto ret = e;
+        for (auto &v : found_vars) {
+            if (!has_loop(v)) continue;
+            auto &loop = find_loop(v);
+            auto v_value = loop.expand_var(loops_, /*skip_fused=*/true);
+            ret = substitute(ret, v, v_value);
+        }
+        if (expand_trivial_vars) {
+            for (auto &kv : loops_) {
+                int bound = to_cpp<int>(kv.second.bound());
+                if (bound != 1) continue;
+                if (!contains_object(ret, kv.first)) continue;
+                ret = substitute(ret, kv.first, expr_t(0));
+            }
+        }
+        return ret;
+    }
+
     // Returns a statement describing the loop nest of the schedule.
     stmt_t create_loop_nest(const stmt_t &_body = stmt_t()) const {
         stmt_t body = _body;
+        auto skip_conds = skip_conditions_;
         for (auto it = vars_.rbegin(); it != vars_.rend(); it++) {
             auto &var = *it;
             auto &loop = find_loop(var);
             if (!loop.is_leaf() || loop.is_tensorized() || loop.is_bound())
                 continue;
             body = maybe_inject_let_for_fused_vars(body, loop);
+            auto cond_it = skip_conds.find(var);
+            if (cond_it != skip_conds.end()) {
+                auto skip_cond = cond_it->second;
+                cond_it->second = expr_t();
+                auto if_stmt = if_t::make(skip_cond, funcs::_continue());
+                body = if_stmt.append(body);
+            }
             body = for_t::make(
                     var, 0, loop.bound(), body, loop.unroll_factor());
         }
+
+        for (auto &kv : skip_conds) {
+            auto &c = kv.second;
+            ir_assert(c.is_empty()) << "Skip condition is not injected: " << c;
+        }
+
         return body;
     }
 
@@ -633,8 +680,6 @@ private:
     // Describes split of a root loop into sub-loops.
     class split_info_t {
     public:
-        split_info_t(const loop_t *root_loop) : root_loop_(root_loop) {}
-
         int nloops() const { return int(loops_.size()); }
 
         void add_sub_loop(
@@ -692,9 +737,9 @@ private:
 
         // Returns initial offset expressed in the outer variables at a given
         // tile level.
-        expr_t start(const object_map_t<expr_t, loop_t> &all_loops,
-                tile_level_t tile_level) const {
-            auto ret = root_loop_->expand_var(all_loops, /*skip_fused=*/true);
+        expr_t start(
+                const expr_t &var_expanded, tile_level_t tile_level) const {
+            auto ret = var_expanded;
             for (int i = 0; i < nloops(); i++) {
                 switch (loop_kinds_[i]) {
                     case loop_kind_t::kernel_grid:
@@ -713,7 +758,6 @@ private:
         }
 
     private:
-        const loop_t *root_loop_;
         std::vector<const loop_t *> loops_;
         std::vector<loop_kind_t> loop_kinds_;
         std::vector<int> loop_levels_;
@@ -821,33 +865,6 @@ private:
         return var_t::make(type_t::s32(), var_name);
     }
 
-    int get_var_key(const expr_t &v) const {
-        int key_max = std::numeric_limits<int>::max();
-        auto &loop = find_loop(v);
-        if (!loop.is_leaf()) return key_max;
-        // Loops bound to the kernel grid.
-        if (loop.is_kernel_grid()) {
-            return kernel_grid_.ndims()
-                    - kernel_grid_.dim_idx(loop.bound_var());
-        }
-        // Loops bound to the thread group grid or serial loop.
-        if (loop.is_tg_grid() || loop.is_serial()) return 10;
-
-        // Tensorized loops are the innermost.
-        if (loop.is_tensorized()) return key_max - 1;
-        ir_error_not_expected() << "Unknown loop";
-        return -1;
-    }
-
-    void sort_vars() {
-        std::stable_sort(vars_.end(), vars_.end(),
-                [&](const expr_t &a_var, const expr_t &b_var) {
-                    int a_key = get_var_key(a_var);
-                    int b_key = get_var_key(b_var);
-                    return a_key < b_key;
-                });
-    }
-
     void init_problem_tiles() {
         object_map_t<expr_t, split_info_t> split_infos;
         for (auto *view : {&a_view_, &b_view_, &c_view_}) {
@@ -894,7 +911,7 @@ private:
     }
 
     split_info_t get_split_info(const expr_t &root_var) const {
-        split_info_t ret(&find_loop(root_var));
+        split_info_t ret;
         std::function<void(const expr_t &)> walk_down;
         walk_down = [&](const expr_t &v) {
             auto &loop = find_loop(v);
@@ -932,7 +949,9 @@ private:
         for (auto &v : vars) {
             auto &split_info = split_infos.at(v);
             tile_dims.push_back(split_info.dim(tile_level));
-            tile_start.push_back(split_info.start(loops_, tile_level));
+
+            auto v_expanded = expand(v);
+            tile_start.push_back(split_info.start(v_expanded, tile_level));
         }
         return tensor_t(tile_dims, tile_start);
     }
@@ -959,6 +978,8 @@ private:
     std::vector<expr_t> vars_;
 
     object_map_t<expr_t, loop_t> loops_;
+
+    object_map_t<expr_t, expr_t> skip_conditions_;
 
     bmnk_mapper_t bmnk_mapper_;
 

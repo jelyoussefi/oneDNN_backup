@@ -272,6 +272,7 @@ Currently the following scenarios are optimized:
   post-operation which format may be queried from attributes using
   `dnnl::post_ops::get_params_binary(...)` function call.
 
+@anchor dev_guide_attributes_post_ops_prelu
 ### Prelu Post-op
 
 The prelu post-op enables fusing a primitive with a @ref dev_guide_prelu
@@ -311,12 +312,13 @@ is the sequence number of the prelu in post-operations chain;
 - only plain layout (a, ab, acb, acdb, acdeb) is supported for weights tensor;
 - mask defines the correspondence between the output tensor dimensions and
   the prelu weights tensor. The set i-th bit indicates that a dedicated weights
-  value is used for each index along that dimension. Mask 0 valuee means common
+  value is used for each index along that dimension. Mask 0 value means common
   (scalar) weights value for the whole output tensor.
 - the order of dimensions does not depend on how elements are laid out in memory.
 For example:
     * for a 2D CNN activations tensor the order is always (n, c)
     * for a 4D CNN activations tensor the order is always (n, c, h, w)
+
 ## Examples of Chained Post-ops
 
 Different post-ops can be chained together by appending one after another.

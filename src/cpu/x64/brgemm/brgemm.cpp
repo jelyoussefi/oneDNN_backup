@@ -128,6 +128,7 @@ void brgemm_kernel_execute_postops(const brgemm_kernel_t *brg_kernel, int bs,
     brgemm_p.BS = bs;
     brgemm_p.post_ops_binary_rhs_arg_vec = post_ops_data.binary_post_ops_rhs;
     brgemm_p.oc_logical_off = post_ops_data.oc_logical_off;
+    brgemm_p.data_C_ptr_ = post_ops_data.data_C_ptr_;
     brgemm_p.dst_row_logical_off = post_ops_data.dst_row_logical_off;
     brgemm_p.first_mb_matrix_addr_off = post_ops_data.first_mb_matrix_addr_off;
 
@@ -502,6 +503,7 @@ status_t brdgmm_desc_init(brgemm_t *brg, cpu_isa_t isa,
     if (!(is_superset(isa, req_isa) && mayiuse(req_isa)))
         return status::unimplemented;
 
+    brg->is_bf16_amx = brg->is_bf16 && mayiuse(avx512_core_bf16_amx_bf16);
     brg->is_dgmm = true;
     brg->type = type;
     brg->layout = layout;
@@ -602,6 +604,10 @@ status_t brgemm_desc_set_postops(brgemm_t *brg, const primitive_attr_t *attr,
     brg->dt_d = dt_d;
     brg->typesize_D = types::data_type_size(brg->dt_d);
 
+    if (!IMPLICATION(
+                brg->is_int8 && brg->dt_d == bf16, mayiuse(avx512_core_bf16)))
+        return status::unimplemented;
+
     if (!brg->attr) return status::success;
 
     using namespace injector;
@@ -622,6 +628,7 @@ status_t brgemm_desc_set_postops(brgemm_t *brg, const primitive_attr_t *attr,
                             {broadcasting_strategy_t::per_oc,
                                     broadcasting_strategy_t::scalar,
                                     broadcasting_strategy_t::per_mb_spatial,
+                                    broadcasting_strategy_t::per_mb_w,
                                     broadcasting_strategy_t::no_broadcast})))
         return status::unimplemented;
 

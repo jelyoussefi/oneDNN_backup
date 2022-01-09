@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2019-2021 Intel Corporation
+* Copyright 2019-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -288,7 +288,10 @@ bool fits_3ch(const memory_desc_wrapper &src_mdw,
 
     // src's innermost dim is assumed to be contiguous, it'll be read from
     // adjacent mem addresses
-    if (last_dim_src.size != src_mdw.padded_dims()[last_dim_src.idx]) {
+    auto src_innermost_stride
+            = src_mdw.blocking_desc().strides[last_dim_src.idx];
+    if (last_dim_src.size != src_mdw.padded_dims()[last_dim_src.idx]
+            || (src_innermost_stride > 1 && src_mdw.is_plain())) {
         return false;
     }
     if (last_dim_src.idx != last_dim_dst.idx) { return false; }
@@ -353,9 +356,10 @@ reorder_kernel_t select_kernel(const reorder_conf_t &conf,
             return reorder_kernel_t::local16x16;
         }
         // W/A for assumed compiler bug: avoid using intel_sub_group_shuffle
-        // with SIMD16 on Gen11. Since Gen11 can't be distinguished using
-        // gpu_arch_t, just don't use this kernel at all.
-        if (true) { return reorder_kernel_t::transpose8x8; }
+        // with SIMD16 on Gen11.
+        if (dev_info->gpu_arch() == compute::gpu_arch_t::gen11) {
+            return reorder_kernel_t::transpose8x8;
+        }
         return reorder_kernel_t::transpose16x16;
     }
     if (matches_one_NxN_layout(src_mdw, dst_mdw, 8, conf.scale_mask)) {
@@ -375,8 +379,7 @@ reorder_kernel_t select_kernel(const reorder_conf_t &conf,
     }
 
     if (!has_padding_or_scale_quant && (conf.nelems % 256 == 0)
-            && src_mdw.similar_to(dst_mdw, true, false, 0)
-            && !has_padding_or_scale_quant) {
+            && src_mdw.similar_to(dst_mdw, true, false, 0)) {
         return reorder_kernel_t::dense_vector;
     }
 
@@ -641,10 +644,6 @@ status_t custom_reorder_t::pd_t::init_conf(engine_t *engine) {
             conf.aux_data.vg.dst_loop_dim = nextlast_dim_src.idx;
             conf.aux_data.vg.innermost_size = min_common_size;
 
-            if (!may_use_sg8 && conf.sub_group_size == 8) {
-                return status_t::dnnl_unimplemented;
-            }
-
             blocks[conf.aux_data.vg.src_loop_dim] = max_group_size;
             blocks[conf.aux_data.vg.dst_loop_dim] = max_group_size;
             // if src loop and dst loop dims are the same, CL code would iterate
@@ -907,6 +906,11 @@ status_t custom_reorder_t::pd_t::init_kernel_ctx(
         }
         kernel_ctx.define_int(
                 "NON_INNERMOST_PADDING", has_non_innermost_padding);
+        auto last_dim_dst = get_Nth_last_dim_or_block(dst_mdw);
+        kernel_ctx.define_int("DST_INNERMOST_STRIDE",
+                dst_mdw.is_plain()
+                        ? dst_mdw.blocking_desc().strides[last_dim_dst.idx]
+                        : 1);
     }
     if (conf.implementation == vectorize_groups) {
         kernel_ctx.define_int("VECTORIZE_GROUPS", 1);

@@ -390,9 +390,24 @@ protected:
     void Forward() {
         data_desc = std::make_shared<memory::desc>(
                 p.dims, data_type, p.data_format);
-        src = test::make_memory(*data_desc, eng);
-        auto dst = test::make_memory(*data_desc, eng);
-        auto ref_dst = test::make_memory(*data_desc, eng);
+
+        auto eltwise_desc = eltwise_forward::desc(prop_kind::forward_training,
+                p.alg_kind, *data_desc, p.alpha, p.beta);
+        eltwise_prim_desc = eltwise_forward::primitive_desc(eltwise_desc, eng);
+        eltwise_prim_desc = eltwise_forward::primitive_desc(
+                eltwise_prim_desc.get()); // test construction from a C pd
+
+        ASSERT_TRUE(eltwise_prim_desc.query_md(query::exec_arg_md, DNNL_ARG_SRC)
+                == eltwise_prim_desc.src_desc());
+        ASSERT_TRUE(eltwise_prim_desc.query_md(query::exec_arg_md, DNNL_ARG_DST)
+                == eltwise_prim_desc.dst_desc());
+        if (p.data_format != memory::format_tag::any) {
+            ASSERT_TRUE(*data_desc == eltwise_prim_desc.src_desc());
+        }
+
+        src = test::make_memory(eltwise_prim_desc.src_desc(), eng);
+        auto dst = test::make_memory(eltwise_prim_desc.dst_desc(), eng);
+        auto ref_dst = test::make_memory(eltwise_prim_desc.dst_desc(), eng);
 
         data_t data_median = data_t(0);
         data_t data_deviation = (p.alg_kind == algorithm::eltwise_elu
@@ -405,17 +420,7 @@ protected:
                 n_elems(*data_desc), src, data_median, data_deviation);
         check_zero_tail<data_t>(1, src);
 
-        auto eltwise_desc = eltwise_forward::desc(prop_kind::forward_training,
-                p.alg_kind, *data_desc, p.alpha, p.beta);
-        eltwise_prim_desc = eltwise_forward::primitive_desc(eltwise_desc, eng);
-        eltwise_prim_desc = eltwise_forward::primitive_desc(
-                eltwise_prim_desc.get()); // test construction from a C pd
-
-        ASSERT_TRUE(eltwise_prim_desc.query_md(query::exec_arg_md, DNNL_ARG_SRC)
-                == eltwise_prim_desc.src_desc());
-        ASSERT_TRUE(eltwise_prim_desc.query_md(query::exec_arg_md, DNNL_ARG_DST)
-                == eltwise_prim_desc.dst_desc());
-
+        EXPECT_ANY_THROW(eltwise_forward(eltwise_prim_desc, {}));
         eltwise_forward(eltwise_prim_desc)
                 .execute(strm, {{DNNL_ARG_SRC, src}, {DNNL_ARG_DST, dst}});
         strm.wait();
@@ -499,6 +504,13 @@ TEST_P(eltwise_test_s8, TestsEltwise) {}
                 alpha, beta, EXPAND_DIMS(__VA_ARGS__) \
     }
 
+#define PARAMS_EF(alg, data, diff_data, alpha, beta, d1, d2, d3, d4, \
+        expect_fail, return_code) \
+    eltwise_test_params_t { \
+        algorithm::alg, EXPAND_FORMATS(data), EXPAND_FORMATS(diff_data), \
+                alpha, beta, {d1, d2, d3, d4}, expect_fail, return_code \
+    }
+
 #define PARAMS_ALL_ALG(...) \
     EXPAND(PARAMS(eltwise_gelu_tanh, __VA_ARGS__)), \
             EXPAND(PARAMS(eltwise_relu, __VA_ARGS__)), \
@@ -509,6 +521,17 @@ TEST_P(eltwise_test_s8, TestsEltwise) {}
             EXPAND(PARAMS(eltwise_exp, __VA_ARGS__)), \
             EXPAND(PARAMS(eltwise_swish, __VA_ARGS__)), \
             EXPAND(PARAMS(eltwise_gelu_erf, __VA_ARGS__))
+
+#define PARAMS_ALL_ALG_EF(...) \
+    EXPAND(PARAMS_EF(eltwise_gelu_tanh, __VA_ARGS__)), \
+            EXPAND(PARAMS_EF(eltwise_relu, __VA_ARGS__)), \
+            EXPAND(PARAMS_EF(eltwise_tanh, __VA_ARGS__)), \
+            EXPAND(PARAMS_EF(eltwise_elu, __VA_ARGS__)), \
+            EXPAND(PARAMS_EF(eltwise_square, __VA_ARGS__)), \
+            EXPAND(PARAMS_EF(eltwise_abs, __VA_ARGS__)), \
+            EXPAND(PARAMS_EF(eltwise_exp, __VA_ARGS__)), \
+            EXPAND(PARAMS_EF(eltwise_swish, __VA_ARGS__)), \
+            EXPAND(PARAMS_EF(eltwise_gelu_erf, __VA_ARGS__))
 
 #define PARAMS_ALL_ALG_SDPART(...) \
     EXPAND(PARAMS(eltwise_linear, __VA_ARGS__)), \
@@ -564,9 +587,12 @@ INST_TEST_CASE(SimpleZeroDim,
         algorithm::eltwise_##alg, EXPAND_FORMATS(nchw), EXPAND_FORMATS(nchw), \
                 0.f, 0.f, {d0, d1, d2, d3}, true, dnnl_invalid_arguments \
     }
+
 INST_TEST_CASE(SimpleExpectedFails, CASE_EF(relu, -1, 2, 4, 4),
         CASE_EF(logistic, -1, 2, 4, 4), CASE_EF(relu, 1, -2, 4, 4),
-        CASE_EF(logistic, 1, -2, 4, 4));
+        CASE_EF(logistic, 1, -2, 4, 4),
+        PARAMS_ALL_ALG_EF(any, nchw, 0.1f, 0.f, 2, 16, 16, 8, true,
+                dnnl_invalid_arguments));
 
 INST_TEST_CASE(Simple_3D,
         PARAMS_ALL_ALG(ncdhw, nCdhw8c, 0.1f, 0.f, 2, 8, 4, 4, 4),

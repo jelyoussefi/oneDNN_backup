@@ -72,7 +72,7 @@ endif()
 
 set(PROJECT_NAME "oneDNN")
 set(PROJECT_FULL_NAME "oneAPI Deep Neural Network Library (oneDNN)")
-set(PROJECT_VERSION "2.4.0")
+set(PROJECT_VERSION "2.5.0")
 
 if (CMAKE_VERSION VERSION_LESS 3.0)
     project(${PROJECT_NAME} C CXX)
@@ -99,6 +99,7 @@ if(NOT DNNL_TARGET_ARCH)
         set(DNNL_TARGET_ARCH "X64")
     endif()
 endif()
+message(STATUS "DNNL_TARGET_ARCH: ${DNNL_TARGET_ARCH}")
 
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 
@@ -107,6 +108,8 @@ set(CMAKE_EXAMPLE_CCXX_FLAGS)   # EXAMPLE specifics
 set(CMAKE_TEST_CCXX_FLAGS)      # TESTS specifics
 
 string(TOUPPER "${CMAKE_BUILD_TYPE}" UPPERCASE_CMAKE_BUILD_TYPE)
+
+include("cmake/dnnl_compat.cmake")
 
 include("cmake/utils.cmake")
 include("cmake/options.cmake")

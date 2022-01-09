@@ -50,7 +50,7 @@ endif()
 
 # TODO: enable me!
 file(GLOB PRIM_TEST_CASES_SRC
-                              test_comparison_operators.cpp
+                              test_persistent_cache_api.cpp
                               test_primitive_cache_mt.cpp
                               test_iface_primitive_cache.cpp
                               test_iface_pd.cpp
@@ -62,7 +62,6 @@ file(GLOB PRIM_TEST_CASES_SRC
                               test_iface_runtime_attr.cpp
                               test_iface_weights_format.cpp
                               test_iface_wino_convolution.cpp
-                              test_dnnl_threading.cpp
                               test_memory.cpp
                               test_sum.cpp
                               test_reorder.cpp
@@ -143,7 +142,6 @@ if(DNNL_TARGET_ARCH STREQUAL "X64" AND NOT DNNL_CPU_RUNTIME STREQUAL "NONE")
         test_isa_mask.cpp
         test_isa_hints.cpp
         test_isa_iface.cpp
-        test_brgemm.cpp
         )
     foreach(TEST_FILE ${X64_PRIM_TEST_CASES_SRC})
         list(APPEND PRIM_TEST_CASES_SRC "${TEST_FILE}")

@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2018-2020 Intel Corporation
+* Copyright 2018-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -115,7 +115,6 @@ protected:
 
     void Forward() {
         memory::desc src_desc(p.dims, data_type, p.data_format);
-        memory::desc dst_desc(p.dims, data_type, p.data_format);
 
         auto shuffle_desc = shuffle_forward::desc(
                 p.aprop_kind, src_desc, p.axis, p.group_size);
@@ -130,14 +129,18 @@ protected:
         ASSERT_TRUE(
                 shuffle_fwd_prim_desc.query_md(query::exec_arg_md, DNNL_ARG_DST)
                 == shuffle_fwd_prim_desc.dst_desc());
+        if (p.data_format != memory::format_tag::any) {
+            ASSERT_TRUE(src_desc == shuffle_fwd_prim_desc.src_desc());
+        }
 
-        test_memory src(src_desc, eng);
-        test_memory dst(dst_desc, eng);
+        test_memory src(shuffle_fwd_prim_desc.src_desc(), eng);
+        test_memory dst(shuffle_fwd_prim_desc.dst_desc(), eng);
 
         fill_data<data_t>(src.get_size() / sizeof(data_t), src.get());
         check_zero_tail<data_t>(1, src.get());
         check_zero_tail<data_t>(1, dst.get());
 
+        EXPECT_ANY_THROW(shuffle_forward(shuffle_fwd_prim_desc, {}));
         shuffle_forward(shuffle_fwd_prim_desc)
                 .execute(strm,
                         {{DNNL_ARG_SRC, src.get()}, {DNNL_ARG_DST, dst.get()}});
@@ -167,12 +170,16 @@ protected:
         ASSERT_TRUE(shuffle_prim_desc.query_md(
                             query::exec_arg_md, DNNL_ARG_DIFF_DST)
                 == shuffle_prim_desc.diff_dst_desc());
+        if (p.data_format != memory::format_tag::any) {
+            ASSERT_TRUE(diff_src_desc == shuffle_prim_desc.diff_src_desc());
+        }
 
         fill_data<data_t>(diff_dst.get_size() / sizeof(data_t), diff_dst.get());
 
         check_zero_tail<data_t>(1, diff_dst.get());
         check_zero_tail<data_t>(1, diff_src.get());
 
+        EXPECT_ANY_THROW(shuffle_backward(shuffle_prim_desc, {}));
         // Execute
         shuffle_backward(shuffle_prim_desc)
                 .execute(strm,
@@ -373,6 +380,9 @@ using shuffle_test_u8 = shuffle_test_t<uint8_t>;
                             true, dnnl_invalid_arguments}, \
                     shuffle_test_params_t {prop_kind::forward_training, \
                             memory::format_tag::nchw, {2, 16, 4, 4}, 4, 2, \
+                            true, dnnl_invalid_arguments}, \
+                    shuffle_test_params_t {prop_kind::forward_training, \
+                            memory::format_tag::any, {2, 10, 4, 4}, 1, 2, \
                             true, dnnl_invalid_arguments}));
 
 INST_TEST_CASE(shuffle_test_float)

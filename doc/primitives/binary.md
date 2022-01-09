@@ -44,14 +44,15 @@ argument index as specified by the following table.
    same number of dimensions.
 
  * The binary primitive supports implicit broadcast semantics for source 0 and 
-   source 1. It means that if some dimension has value of one, this value will
-   be used to compute an operation with each point of source 0 / source 1 for 
-   this dimension. It is recommended to use broadcast for source 1 to get 
-   better performance. Generally it should match the syntax below:
+   source 1. This means that if a dimension size is one, that single value 
+   will be broadcast (used to compute an operation with each point of the other 
+   source) for that dimension. It is recommended to use broadcast for source 1 
+   to get better performance. Generally it should match the syntax below:
    `{N,1}x{C,1}x{D,1}x{H,1}x{W,1}:{N,1}x{C,1}x{D,1}x{H,1}x{W,1} -> NxCxDxHxW`.
    It is consistent with [PyTorch broadcast semantic]
    (https://pytorch.org/docs/stable/notes/broadcasting.html).
-   
+
+ * The dimensions of both sources must match unless either is equal to one.
 
  * The \dst memory format can be either specified explicitly or by
    #dnnl::memory::format_tag::any (recommended), in which case the primitive
@@ -64,16 +65,16 @@ argument index as specified by the following table.
    be overwritten. In-place mode requires the \dst and source 0 data types to be
    the same. Different data types will unavoidably lead to correctness issues.
 
-### Post-ops and Attributes
+### Post-Ops and Attributes
 
 The following attributes are supported:
 
 | Type      | Operation                                       | Description                                                                    | Restrictions
 | :--       | :--                                             | :--                                                                            | :--
 | Attribute | [Scales](@ref dnnl::primitive_attr::set_scales) | Scales the corresponding input tensor by the given scale factor(s).            | Only one scale per tensor is supported. Input tensors only. |
-| Post-op   | [Sum](@ref dnnl::post_ops::append_sum)          | Adds the operation result to the destination tensor instead of overwriting it. |                                                                                                             |
-| Post-op   | [Eltwise](@ref dnnl::post_ops::append_eltwise)  | Applies an @ref dnnl_api_eltwise operation to the result.                      |                                                                                                             |
-| Post-op   | [Binary](@ref dnnl::post_ops::append_binary)    | Applies a @ref dnnl_api_binary operation to the result                         | General binary post-op restrictions                                                                         |
+| Post-op   | [Sum](@ref dnnl::post_ops::append_sum)          | Adds the operation result to the destination tensor instead of overwriting it. |                                                             |
+| Post-op   | [Eltwise](@ref dnnl::post_ops::append_eltwise)  | Applies an @ref dnnl_api_eltwise operation to the result.                      |                                                             |
+| Post-op   | [Binary](@ref dnnl::post_ops::append_binary)    | Applies a @ref dnnl_api_binary operation to the result                         | General binary post-op restrictions                         |
 
 ### Data Types Support
 
@@ -111,10 +112,10 @@ meaning associated with any of tensors dimensions.
 
 ## Examples
 
-### @ref binary_example_cpp - CPU/GPU
-
+[Binary Primitive Example](@ref binary_example_cpp)
+ 
 @copydetails binary_example_cpp_short
 
-### @ref bnorm_u8_via_binary_postops_cpp - CPU/GPU
+[Bnorm u8 by Binary Post-Ops Example](@ref bnorm_u8_via_binary_postops_cpp) 
 
 @copydetails bnorm_u8_via_binary_postops_cpp_short

@@ -43,30 +43,18 @@ void check_correctness(const settings_t &s, const settings_t &def) {
     for_(const auto &i_wtag : s.wtag)
     for_(const auto &i_dtag : s.dtag)
     for_(const auto &i_strides : s.strides)
-    for_(auto i_runtime_mb : s.runtime_mb)
-    for_(auto i_runtime_m : s.runtime_m)
-    for_(auto i_runtime_n : s.runtime_n)
-    for_(auto i_runtime_k : s.runtime_k)
+    for_(const auto &i_rt_dims_masks : s.rt_dims_masks)
     for_(const auto &i_oscale : s.oscale)
     for_(const auto &i_zero_points : s.zero_points)
     for_(const auto &i_post_ops : s.post_ops)
     for_(const auto &i_scratchpad_mode : s.scratchpad_mode)
-    for_(const auto &i_bia_cfg : bia_cfg)
-    for (const auto &i_rt_dims_masks : s.rt_dims_masks) {
+    for (const auto &i_bia_cfg : bia_cfg) {
         attr_t attr;
         attr.insert(i_oscale);
         attr.insert(i_zero_points);
         attr.insert(i_post_ops);
         attr.insert(i_scratchpad_mode);
         handle_legacy_attr(attr, s.attr);
-
-        if (s.desc.is_legacy_desc) {
-            for (auto &mask : i_rt_dims_masks) {
-                if (mask.any()) { SAFE_V(FAIL); }
-            }
-        } else if (i_runtime_mb || i_runtime_m || i_runtime_k || i_runtime_n) {
-            SAFE_V(FAIL);
-        }
 
         const bool strided_input = !i_strides[STRIDES_SRC].empty()
                 || !i_strides[STRIDES_WEI].empty()
@@ -90,8 +78,7 @@ void check_correctness(const settings_t &s, const settings_t &def) {
             }
         }
 
-        const prb_t prb(s.desc, i_cfg, i_stag, i_wtag, i_dtag, i_strides,
-                i_runtime_mb, i_runtime_m, i_runtime_n, i_runtime_k,
+        const prb_t prb(s.prb_vdims, i_cfg, i_stag, i_wtag, i_dtag, i_strides,
                 i_bia_cfg.first, i_bia_cfg.second, i_rt_dims_masks, attr);
         std::stringstream ss;
         ss << prb;
@@ -114,6 +101,16 @@ void check_correctness(const settings_t &s, const settings_t &def) {
     }
 }
 
+static const std::string help_bia_mask
+        = "UINT    (Default: `2`)\n    Specifies a bit-mask that indicates "
+          "which bias dimensions coincide with C matrix dimensions, when `1` "
+          "is on a correspondent dimension.\n";
+
+static const std::string help_runtime_dims_masks
+        = "UINT:UINT    (Default: `0:0`)\n    Specifies a bit-mask for "
+          "matrices A and B that indicates whether a dimension is "
+          "`DNNL_RUNTIME_DIM_VAL` if `1` on a correspondent dimension.\n";
+
 int bench(int argc, char **argv) {
     driver_name = "matmul";
     using namespace parser;
@@ -127,19 +124,12 @@ int bench(int argc, char **argv) {
                 || parse_tag(s.wtag, def.wtag, argv[0], "wtag")
                 || parse_tag(s.dtag, def.dtag, argv[0], "dtag")
                 || parse_strides(s.strides, def.strides, argv[0], "strides")
-                || parse_vector_option(s.runtime_mb, def.runtime_mb, str2bool,
-                        argv[0], "runtime_mb")
-                || parse_vector_option(s.runtime_m, def.runtime_m, str2bool,
-                        argv[0], "runtime_m")
-                || parse_vector_option(s.runtime_n, def.runtime_n, str2bool,
-                        argv[0], "runtime_n")
-                || parse_vector_option(s.runtime_k, def.runtime_k, str2bool,
-                        argv[0], "runtime_k")
                 || parse_dt(s.bia_dt, def.bia_dt, argv[0], "bia_dt")
-                || parse_vector_option(
-                        s.bia_mask, def.bia_mask, atoi, argv[0], "bia_mask")
+                || parse_vector_option(s.bia_mask, def.bia_mask, atoi, argv[0],
+                        "bia_mask", help_bia_mask)
                 || parse_multivector_option(s.rt_dims_masks, def.rt_dims_masks,
-                        atoi, argv[0], "runtime_dims_masks")
+                        atoi, argv[0], "runtime_dims_masks",
+                        help_runtime_dims_masks)
                 || parse_attr(s.attr, argv[0])
                 || parse_attr_oscale(s.oscale, argv[0])
                 || parse_attr_zero_points(s.zero_points, argv[0])
@@ -148,11 +138,11 @@ int bench(int argc, char **argv) {
                         s.scratchpad_mode, def.scratchpad_mode, argv[0])
                 || parse_perf_template(s.perf_template, s.perf_template_def,
                         s.perf_template_csv, argv[0])
-                || parse_reset(s, argv[0]);
+                || parse_reset(s, argv[0]) || parse_help(argv[0]);
         if (!parsed_options) {
             catch_unknown_options(argv[0]);
 
-            SAFE(str2desc(&s.desc, argv[0]), CRIT);
+            parse_prb_vdims(s.prb_vdims, argv[0]);
             check_correctness(s, def);
         }
     }

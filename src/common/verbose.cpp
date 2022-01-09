@@ -70,23 +70,27 @@ namespace impl {
 
 static setting_t<int> verbose {0};
 int get_verbose() {
-#if !defined(DISABLE_VERBOSE)
-    // Assumes that all threads see the same environment
-    const int len = 2;
-    char val[len] = {0};
-    static int get_verbose_val = getenv("DNNL_VERBOSE", val, len);
-    if (get_verbose_val == 1) verbose.set(atoi(val), true);
+#if defined(DISABLE_VERBOSE)
+    return 0;
+#else
+    if (!verbose.initialized()) {
+        // Assumes that all threads see the same environment
+        static int val = getenv_int_user("VERBOSE", verbose.get());
+        verbose.set(val);
+    }
+
     static std::atomic_flag version_printed = ATOMIC_FLAG_INIT;
     if (verbose.get() > 0 && !version_printed.test_and_set()) {
-        printf("dnnl_verbose,info,oneDNN v%d.%d.%d (commit %s)\n",
+        printf("onednn_verbose,info,oneDNN v%d.%d.%d (commit %s)\n",
                 dnnl_version()->major, dnnl_version()->minor,
                 dnnl_version()->patch, dnnl_version()->hash);
 #if DNNL_CPU_RUNTIME != DNNL_RUNTIME_NONE
-        printf("dnnl_verbose,info,cpu,runtime:%s\n",
+        printf("onednn_verbose,info,cpu,runtime:%s\n",
                 dnnl_runtime2str(dnnl_version()->cpu_runtime));
-        printf("dnnl_verbose,info,cpu,isa:%s\n", cpu::platform::get_isa_info());
+        printf("onednn_verbose,info,cpu,isa:%s\n",
+                cpu::platform::get_isa_info());
 #endif
-        printf("dnnl_verbose,info,gpu,runtime:%s\n",
+        printf("onednn_verbose,info,gpu,runtime:%s\n",
                 dnnl_runtime2str(dnnl_version()->gpu_runtime));
 #if DNNL_GPU_RUNTIME == DNNL_RUNTIME_OCL
         gpu::ocl::print_verbose_header();
@@ -94,28 +98,31 @@ int get_verbose() {
 #ifdef DNNL_WITH_SYCL
         sycl::print_verbose_header();
 #endif
-        printf("dnnl_verbose,info,prim_template:");
+        printf("onednn_verbose,info,prim_template:");
         printf("%soperation,engine,primitive,implementation,prop_"
                "kind,memory_descriptors,attributes,auxiliary,problem_desc,exec_"
                "time\n",
                 get_verbose_timestamp() ? "timestamp," : "");
     }
-#endif
     return verbose.get();
+#endif
 }
 
 static setting_t<bool> verbose_timestamp {false};
 bool get_verbose_timestamp() {
-#if !defined(DISABLE_VERBOSE)
-    // Assumes that all threads see the same environment
-    const int len = 2;
-    char val[len] = {0};
-    static int get_verbose_timestamp_val
-            = getenv("DNNL_VERBOSE_TIMESTAMP", val, len);
-    if (get_verbose_timestamp_val == 1) verbose_timestamp.set(atoi(val), true);
+#if defined(DISABLE_VERBOSE)
+    return false;
+#else
+    if (verbose.get() == 0) return false;
+
+    if (!verbose_timestamp.initialized()) {
+        // Assumes that all threads see the same environment
+        static bool val
+                = getenv_int_user("VERBOSE_TIMESTAMP", verbose_timestamp.get());
+        verbose_timestamp.set(val);
+    }
+    return verbose_timestamp.get();
 #endif
-    // No effect if verbose is not set.
-    return verbose.get() && verbose_timestamp.get();
 }
 
 double get_msec() {
@@ -334,7 +341,9 @@ std::string md2desc_str(const memory_desc_t *md) {
 
 std::ostream &operator<<(std::ostream &ss, const scales_t &oscale) {
     ss << oscale.mask_;
-    if (oscale.mask_ == 0) ss << ":" << get_val_str(oscale.scales_[0]);
+    const float val = oscale.scales_[0];
+    if (oscale.mask_ == 0 || is_runtime_value(val))
+        ss << ":" << get_val_str(val);
     return ss;
 }
 
@@ -387,7 +396,8 @@ std::ostream &operator<<(std::ostream &ss, const primitive_attr_t *attr) {
                << (arg == DNNL_ARG_SRC ? "src"
                                        : arg == DNNL_ARG_DST ? "dst" : "wei")
                << ":" << mask;
-            if (mask == 0) ss << ":" << get_val_str(*zpp);
+            if (mask == 0 || is_runtime_value(*zpp))
+                ss << ":" << get_val_str(*zpp);
             delim = attr_delim;
         }
         ss << " ";
@@ -416,7 +426,7 @@ std::ostream &operator<<(std::ostream &ss, const primitive_attr_t *attr) {
                     ss << delim << "dw_k3s" << c.stride << "p1";
                     if (c.wei_dt == s8 || c.dst_dt != f32)
                         ss << ":" << c.dst_dt;
-                    if (c.wei_dt == s8) {
+                    if (c.count > 0 && c.wei_dt == s8) {
                         ss << ":" << c.mask;
                         if (c.mask == 0) ss << ":" << c.scales[0];
                     }
@@ -818,41 +828,45 @@ static std::string init_info_rnn(const engine_t *e, const pd_t *pd) {
     ss << e << "," << pd->kind() << "," << pd->name() << ","
        << pd->desc()->prop_kind << ",";
 
-    auto src_layer_md = pd->is_fwd() ? pd->src_md(0) : pd->diff_src_md(0);
-    ss << "src_layer_" << src_layer_md;
-    if (pd->with_src_iter()) {
-        auto src_iter_md = pd->is_fwd() ? pd->src_md(1) : pd->diff_src_md(1);
-        ss << " src_iter_" << src_iter_md;
+    auto tensor_sep = "";
+    auto print_tensor = [&](bool cond, int arg_idx, const char *arg_str) {
+        if (cond) {
+            auto md = pd->arg_md(arg_idx);
+            ss << tensor_sep << arg_str << "_" << md;
+        }
+        tensor_sep = " ";
+    };
+
+    // TODO: shorten the names to consume fewer characters on verbose
+    // output
+    print_tensor(true, DNNL_ARG_SRC_LAYER, "src_layer");
+    print_tensor(pd->with_src_iter(), DNNL_ARG_SRC_ITER, "src_iter");
+    print_tensor(true, DNNL_ARG_WEIGHTS_LAYER, "wei_layer");
+    print_tensor(true, DNNL_ARG_WEIGHTS_ITER, "wei_iter");
+    print_tensor(
+            pd->is_lstm_peephole(), DNNL_ARG_WEIGHTS_PEEPHOLE, "wei_peephole");
+    print_tensor(
+            pd->is_lstm_projection(), DNNL_ARG_WEIGHTS_PROJECTION, "wei_proj");
+    print_tensor(pd->with_bias(), DNNL_ARG_BIAS, "bias");
+    print_tensor(true, DNNL_ARG_DST_LAYER, "dst_layer");
+    print_tensor(pd->with_dst_iter(), DNNL_ARG_DST_ITER, "dst_iter");
+
+    if (!pd->is_fwd()) {
+        print_tensor(true, DNNL_ARG_DIFF_SRC_LAYER, "diff_src_layer");
+        print_tensor(
+                pd->with_src_iter(), DNNL_ARG_DIFF_SRC_ITER, "diff_src_iter");
+        print_tensor(true, DNNL_ARG_DIFF_WEIGHTS_LAYER, "diff_wei_layer");
+        print_tensor(true, DNNL_ARG_DIFF_WEIGHTS_ITER, "diff_wei_iter");
+        print_tensor(pd->is_lstm_peephole(), DNNL_ARG_DIFF_WEIGHTS_PEEPHOLE,
+                "diff_wei_peephole");
+        print_tensor(pd->is_lstm_projection(), DNNL_ARG_DIFF_WEIGHTS_PROJECTION,
+                "diff_wei_proj");
+        print_tensor(pd->with_bias(), DNNL_ARG_DIFF_BIAS, "diff_bias");
+        print_tensor(true, DNNL_ARG_DIFF_DST_LAYER, "diff_dst_layer");
+        print_tensor(
+                pd->with_dst_iter(), DNNL_ARG_DIFF_DST_ITER, "diff_dst_iter");
     }
-    auto wei_layer_md
-            = pd->is_fwd() ? pd->weights_md(0) : pd->diff_weights_md(0);
-    ss << " wei_layer_" << wei_layer_md;
-    auto wei_iter_md
-            = pd->is_fwd() ? pd->weights_md(1) : pd->diff_weights_md(1);
-    ss << " wei_iter_" << wei_iter_md;
-    if (pd->is_lstm_peephole()) {
-        auto wei_peephole_md
-                = pd->arg_md(pd->is_fwd() ? DNNL_ARG_WEIGHTS_PEEPHOLE
-                                          : DNNL_ARG_DIFF_WEIGHTS_PEEPHOLE);
-        ss << " wei_peephole_" << wei_peephole_md;
-    }
-    if (pd->is_lstm_projection()) {
-        auto wei_projection_md
-                = pd->arg_md(pd->is_fwd() ? DNNL_ARG_WEIGHTS_PROJECTION
-                                          : DNNL_ARG_DIFF_WEIGHTS_PROJECTION);
-        ss << " wei_proj_" << wei_projection_md;
-    }
-    if (pd->with_bias()) {
-        auto bia_md
-                = pd->arg_md(pd->is_fwd() ? DNNL_ARG_BIAS : DNNL_ARG_DIFF_BIAS);
-        ss << " bias_" << bia_md;
-    }
-    auto dst_layer_md = pd->is_fwd() ? pd->dst_md(0) : pd->diff_dst_md(0);
-    ss << " dst_layer_" << dst_layer_md;
-    if (pd->with_dst_iter()) {
-        auto dst_iter_md = pd->is_fwd() ? pd->dst_md(1) : pd->diff_dst_md(1);
-        ss << " dst_iter_" << dst_iter_md;
-    }
+
     ss << ",";
 
     ss << pd->attr() << ",";

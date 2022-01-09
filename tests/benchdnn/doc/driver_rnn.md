@@ -12,8 +12,10 @@ where *rnn-knobs* are:
  - `--cfg={f32 [default], ...}` -- refer to ``Configurations`` below.
  - `--alg={VANILLA_RNN [default], VANILLA_LSTM, VANILLA_GRU, LBR_GRU}`
             -- RNN algorithm.
- - `--direction={left2right [default], right2left, concat, sum}` -- TBA.
- - `--activation={RELU [default], LOGISTIC, TANH}` -- TBA.
+ - `--direction={left2right [default], right2left, concat, sum}` -- RNN
+            evaluation direction.
+ - `--activation={RELU [default], LOGISTIC, TANH}` -- `VANILLA_RNN` activation
+            functions.
  - `--scaling="scale_str"` -- RNN scaling policy, default `""` (no scaling).
  - `--scaling-proj="scale_str"` -- RNN scaling policy for the
             projection weights, default `""` (no scaling).
@@ -93,7 +95,7 @@ Run the set of rnn training from an input file with the default settings:
     ./benchdnn --rnn --batch=inputs/rnn/shapes_training
 ```
 
-More examples with different driver options can be found at inputs/rnn/test_***.
+More examples with different driver options can be found at inputs/rnn/test_\*.
 Examples with different problem descriptors can be found at
-inputs/rnn/shapes_***. More examples with different benchdnn common options can
+inputs/rnn/shapes_\*. More examples with different benchdnn common options can
 be found at driver_conv.md.

@@ -16,6 +16,7 @@
 
 #include <assert.h>
 
+#include "common/impl_registration.hpp"
 #include "gpu/jit/gemm/xe_hp_systolic_gemm_kernel.hpp"
 
 using namespace ngen;
@@ -1441,9 +1442,7 @@ void xehp_systolic_gemm_kernel_t<hw>::body() {
 }
 
 template <HW hw>
-xehp_systolic_gemm_kernel_t<hw>::xehp_systolic_gemm_kernel_t(config_t cfg_)
-    : cfg(cfg_) {
-    if (!cfg.valid()) assert(!"Invalid configuration");
+void xehp_systolic_gemm_kernel_t<hw>::generate() {
 
     if (cfg.have_post_op()) {
         auto inj_ptr = new injector_t(this, data_type::f32, cfg.post_ops,
@@ -1464,7 +1463,6 @@ xehp_systolic_gemm_kernel_t<hw>::xehp_systolic_gemm_kernel_t(config_t cfg_)
     //                           [, int *co, int offset_co [, uint flags]]
     //                           [, int stride_a, int stride_b, int stride_c);
 
-    externalName("xehp_systolic_gemm_kernel");
     newArgument("ap", ExternalArgumentType::GlobalPtr);
     newArgument("bp", ExternalArgumentType::GlobalPtr);
     newArgument("c", ExternalArgumentType::GlobalPtr);
@@ -1730,8 +1728,8 @@ xehp_systolic_gemm_kernel_t<hw>::xehp_systolic_gemm_kernel_t(config_t cfg_)
         nop();
 }
 
-template class xehp_systolic_gemm_kernel_t<HW::XeHP>;
-template class xehp_systolic_gemm_kernel_t<HW::XeHPG>;
+REG_XEHP_ISA(template class xehp_systolic_gemm_kernel_t<HW::XeHP>);
+REG_XEHPG_ISA(template class xehp_systolic_gemm_kernel_t<HW::XeHPG>);
 
 } // namespace jit
 } // namespace gpu

@@ -34,6 +34,7 @@ int check_primitive_cache(dnnl_primitive_t p);
 #include "common.hpp"
 #include "dnn_types.hpp"
 #include "dnnl_debug.hpp"
+#include "utils/dims.hpp"
 
 #define for_ for
 
@@ -359,6 +360,8 @@ inline const engine_t &get_cpu_engine() {
 
 int get_memory_footprint(const_dnnl_primitive_desc_t pd, res_t *res);
 int check_same_pd(res_t *res, const dnnl_primitive_desc_t &pd_no_attr);
+int test_persistent_cache_api(benchdnn_dnnl_wrapper_t<dnnl_primitive_t> &prim,
+        const benchdnn_dnnl_wrapper_t<dnnl_primitive_desc_t> &pd, res_t *res);
 
 template <typename op_desc_t>
 int check_pd_w_and_wo_attr(
@@ -431,8 +434,9 @@ int init_prim(benchdnn_dnnl_wrapper_t<dnnl_primitive_t> &user_prim,
     // Collect memory footprint for a given primitive descriptor.
     SAFE(get_memory_footprint(pd, res), WARN);
 
-    user_prim.reset(prim.release());
+    SAFE(test_persistent_cache_api(prim, pd, res), WARN);
 
+    user_prim.reset(prim.release());
     return OK;
 }
 
@@ -487,5 +491,6 @@ int check_mem_size(const_dnnl_primitive_desc_t const_pd);
 memory_kind_ext_t str2memory_kind(const char *str);
 
 float reorder_rescale_factor();
+dims_t md2dims(const dnnl_memory_desc_t &md);
 
 #endif

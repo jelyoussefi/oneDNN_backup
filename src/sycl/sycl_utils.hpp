@@ -25,49 +25,45 @@
 #include <vector>
 #include <CL/sycl.hpp>
 
+#if defined(__INTEL_LLVM_COMPILER)
+#if (__INTEL_LLVM_COMPILER < 20220000)
+#define DNNL_USE_SYCL121_API 1
+#else
+#define DNNL_USE_SYCL121_API 0
+#endif
+#elif defined(__LIBSYCL_MAJOR_VERSION) && defined(__LIBSYCL_MINOR_VERSION)
+#if (__LIBSYCL_MAJOR_VERSION == 5 && __LIBSYCL_MINOR_VERSION < 4)
+#define DNNL_USE_SYCL121_API 1
+#else
+#define DNNL_USE_SYCL121_API 0
+#endif
+#else
+#error "Unsupported compiler"
+#endif
+
 namespace dnnl {
 namespace impl {
 namespace sycl {
 
-using buffer_u8_t = cl::sycl::buffer<uint8_t, 1>;
+using buffer_u8_t = ::sycl::buffer<uint8_t, 1>;
 
-inline cl::sycl::nd_range<3> to_sycl_nd_range(
+inline ::sycl::nd_range<3> to_sycl_nd_range(
         const gpu::compute::nd_range_t &range) {
     auto *local_range = range.local_range();
     auto *global_range = range.global_range();
 
-    auto sycl_global_range = cl::sycl::range<3>(
+    auto sycl_global_range = ::sycl::range<3>(
             global_range[2], global_range[1], global_range[0]);
 
     if (!local_range) {
         assert(!"not expected");
-        return cl::sycl::nd_range<3>(
-                sycl_global_range, cl::sycl::range<3>(1, 1, 1));
+        return ::sycl::nd_range<3>(
+                sycl_global_range, ::sycl::range<3>(1, 1, 1));
     }
 
-    auto sycl_local_range = cl::sycl::range<3>(
-            local_range[2], local_range[1], local_range[0]);
-    return cl::sycl::nd_range<3>(sycl_global_range, sycl_local_range);
-}
-
-// Automatically use host_task if it is supported by compiler,
-// otherwise fall back to codeplay_host_task.
-template <typename H, typename F>
-inline auto host_task_impl(H &cgh, F &&f, int) -> decltype(cgh.host_task(f)) {
-    cgh.host_task(f);
-}
-
-template <typename H, typename F>
-inline auto host_task_impl(H &cgh, F &&f, long)
-        -> decltype(cgh.codeplay_host_task(f)) {
-    cgh.codeplay_host_task(f);
-}
-
-template <typename H, typename F>
-inline void host_task(H &cgh, F &&f) {
-    // Third argument is 0 (int) which prefers the
-    // host_task option if both are available.
-    host_task_impl(cgh, f, 0);
+    auto sycl_local_range
+            = ::sycl::range<3>(local_range[2], local_range[1], local_range[0]);
+    return ::sycl::nd_range<3>(sycl_global_range, sycl_local_range);
 }
 
 enum class backend_t { unknown, host, level0, opencl, nvidia };
@@ -84,11 +80,11 @@ inline std::string to_string(backend_t backend) {
 
 backend_t get_sycl_gpu_backend();
 
-inline backend_t get_sycl_backend(const cl::sycl::device &dev) {
+inline backend_t get_sycl_backend(const ::sycl::device &dev) {
     if (dev.is_host()) return backend_t::host;
 
     auto plat = dev.get_platform();
-    std::string plat_name = plat.get_info<cl::sycl::info::platform::name>();
+    std::string plat_name = plat.get_info<::sycl::info::platform::name>();
     if (plat_name.find("OpenCL") != std::string::npos) return backend_t::opencl;
     if (plat_name.find("NVIDIA") != std::string::npos) return backend_t::nvidia;
 
@@ -98,8 +94,8 @@ inline backend_t get_sycl_backend(const cl::sycl::device &dev) {
     return backend_t::unknown;
 }
 
-bool are_equal(const cl::sycl::device &lhs, const cl::sycl::device &rhs);
-device_id_t sycl_device_id(const cl::sycl::device &dev);
+bool are_equal(const ::sycl::device &lhs, const ::sycl::device &rhs);
+device_id_t sycl_device_id(const ::sycl::device &dev);
 
 } // namespace sycl
 } // namespace impl

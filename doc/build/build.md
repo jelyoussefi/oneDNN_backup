@@ -68,8 +68,8 @@ source /opt/intel/oneapi/setvars.sh
 mkdir -p build
 cd build
 
-export CC=clang
-export CXX=clang++
+export CC=icx
+export CXX=icpx
 
 cmake .. \
           -DDNNL_CPU_RUNTIME=DPCPP
@@ -81,6 +81,9 @@ Open-source version of oneAPI DPC++ Compiler may not contain OpenCL runtime.
 In this case, you can use `OPENCLROOT` CMake option or environment variable
 of the same name to specify path to the OpenCL runtime if it is installed in
 a custom location.
+
+@note Open-source version of oneAPI DPC++ Compiler does not have the icx/icpx
+drivers, use clang/clang++ instead.
 
 - Build the library
 ~~~sh
@@ -114,7 +117,7 @@ make -j
 - Configure CMake and generate makefiles
 ~~~sh
 export ACL_ROOT_DIR=<path/to/Compute Library>
-cmake .. \
+/cmake .. \
           -DDNNL_AARCH64_USE_ACL=ON \
           <extra build options>
 ~~~
@@ -132,18 +135,22 @@ make -j
 ~~~bat
 mkdir build
 cd build
-cmake -G "Visual Studio 15 2017 Win64" ..
+cmake -G "Visual Studio 16 2019 Win64" ..
 ~~~
 For the solution to use the Intel C++ Compiler, select the corresponding
 toolchain using the cmake `-T` switch:
 ~~~bat
-cmake -G "Visual Studio 15 2017 Win64" -T "Intel C++ Compiler 19.0" ..
+cmake -G "Visual Studio 16 2019 Win64" -T "Intel C++ Compiler 19.0" ..
 ~~~
 
 - Build the library
 ~~~bat
-cmake --build .
+cmake --build . --config=Release
 ~~~
+
+@note CMake's Microsoft Visual Studio generator does not respect `CMAKE_BUILD_TYPE` option.
+Solution file supports both Debug and Release builds with Debug being the default.
+You can choose specific build type with `--config` option.
 
 @note You can also open `oneDNN.sln` to build the project from the
 Microsoft Visual Studio IDE.
@@ -167,8 +174,8 @@ mkdir build
 cd build
 
 :: Set C and C++ compilers
-set CC=clang
-set CXX=clang++
+set CC=icx
+set CXX=icx
 cmake .. -G Ninja -DDNNL_CPU_RUNTIME=DPCPP ^
                   -DDNNL_GPU_RUNTIME=DPCPP ^
                   -DCMAKE_PREFIX_PATH=<path to Level Zero headers> ^
@@ -179,6 +186,9 @@ Open-source version of oneAPI DPC++ Compiler may not contain OpenCL runtime.
 In this case, you can use `OPENCLROOT` CMake option or environment variable
 of the same name to specify path to the OpenCL runtime if it is installed in
 a custom location.
+
+@note Open-source version of oneAPI DPC++ Compiler does not have the icx driver,
+use clang/clang++ instead.
 
 @note The only CMake generator that supports oneAPI DPC++ Compiler on Windows
 is Ninja. CC and CXX variables must be set to clang and clang++ respectively. 
@@ -195,7 +205,7 @@ If the library is built for the host system, you can run unit tests using:
 ctest
 ~~~
 
-## Build documenation
+## Build documentation
 
 - Install the requirements
 ~~~sh

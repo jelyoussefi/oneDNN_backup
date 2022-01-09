@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2017-2021 Intel Corporation
+* Copyright 2017-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
 *******************************************************************************/
 
 // DO NOT EDIT, AUTO-GENERATED
+// Use this script to update the file: scripts/generate_dnnl_debug.py
 
 // clang-format off
 
@@ -549,6 +550,21 @@ dnnl_format_tag_t str2fmt_tag(const char *str) {
     CASE(BA4b8a16b4a);
     CASE(aCB4c8b16c2b);
     CASE(aCB4c8b16c4b);
+    CASE(BA16a16b);
+    CASE(BA16a32b);
+    CASE(BA16a48b);
+    CASE(BA16a64b);
+    CASE(aCB16c2b);
+    CASE(aCB16c4b);
+    CASE(BA16b2a);
+    CASE(BA16b4a);
+    CASE(aBC16b16c);
+    CASE(aBC16b32c);
+    CASE(AB16a16b);
+    CASE(AB16a32b);
+    CASE(adbc);
+    CASE(ABcde16a16b2a);
+    CASE(aBCdef16b16c2b);
     CASE(x);
     CASE(nc);
     CASE(cn);
@@ -727,6 +743,7 @@ dnnl_format_tag_t str2fmt_tag(const char *str) {
     CASE(IOdhw16i16o);
     CASE(OIdhw4o8i8o4i);
     CASE(IOdhw16o16i);
+    CASE(OIdhw16o16i2o);
     CASE(Goiw16g);
     CASE(Goiw8g);
     CASE(Goiw4g);
@@ -819,6 +836,7 @@ dnnl_format_tag_t str2fmt_tag(const char *str) {
     CASE(gOIdhw2i8o4i);
     CASE(gOIdhw16i16o2i);
     CASE(gOIdhw16o16i);
+    CASE(gOIdhw16o16i2o);
     CASE(gOidhw16o);
     CASE(gOIdhw4i4o);
     CASE(gOIdhw4o4i);

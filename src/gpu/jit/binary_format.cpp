@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2019-2021 Intel Corporation
+* Copyright 2019-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -128,7 +128,11 @@ public:
         mark(doWrite);
 
         // Write out results.
-        {
+        if (hw >= HW::XeHPC) {
+            // stateless
+            mov<uint32_t>(2, header, getArgument("ok").d(0)(1));
+            store.ugm(1 | SWSB(sb2, 1), D32(1), A64, header, data);
+        } else {
             // bti surface
             mov<uint32_t>(1, header, uint16_t(0));
             store(1 | SWSB(sb2, 1), scattered_dword(), ok_surface, header,
@@ -146,12 +150,17 @@ public:
         if (hw != HW::Unknown) {
             binary_format_kernel_t<hw> binary_format_kernel;
 
-            auto status = engine->create_kernel(&kernel, binary_format_kernel);
+            auto status
+                    = engine->create_kernel(&kernel, &binary_format_kernel, {});
             if (status != status::success) return nullptr;
         } else {
             switch (engine->device_info()->gpu_arch()) {
                 case compute::gpu_arch_t::gen9:
                     kernel = binary_format_kernel_t<HW::Gen9>::make_kernel(
+                            engine);
+                    break;
+                case compute::gpu_arch_t::gen11:
+                    kernel = binary_format_kernel_t<HW::Gen11>::make_kernel(
                             engine);
                     break;
                 case compute::gpu_arch_t::xe_lp:
@@ -166,7 +175,11 @@ public:
                     kernel = binary_format_kernel_t<HW::XeHPG>::make_kernel(
                             engine);
                     break;
-                default: kernel = nullptr; break;
+                case compute::gpu_arch_t::xe_hpc:
+                    kernel = binary_format_kernel_t<HW::XeHPC>::make_kernel(
+                            engine);
+                    break;
+                case compute::gpu_arch_t::unknown: kernel = nullptr; break;
             }
         }
         return kernel;

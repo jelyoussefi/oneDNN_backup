@@ -35,8 +35,8 @@ public:
     using sycl_engine_base_t::create_stream;
     using sycl_engine_base_t::device;
 
-    sycl_gpu_engine_t(const cl::sycl::device &dev, const cl::sycl::context &ctx,
-            size_t index)
+    sycl_gpu_engine_t(
+            const ::sycl::device &dev, const ::sycl::context &ctx, size_t index)
         : sycl_engine_base_t(engine_kind::gpu, dev, ctx, index) {
         assert(dev.is_gpu());
     }
@@ -67,8 +67,8 @@ public:
     }
 
     const impl_list_item_t *get_implementation_list(
-            const op_desc_t *) const override {
-        return gpu::gpu_impl_list_t::get_implementation_list();
+            const op_desc_t *desc) const override {
+        return gpu::gpu_impl_list_t::get_implementation_list(desc);
     }
 
 #ifdef DNNL_USE_RT_OBJECTS_IN_PRIMITIVE_CACHE

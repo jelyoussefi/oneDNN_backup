@@ -19,6 +19,7 @@
 #include "c_types_map.hpp"
 #include "nstl.hpp"
 
+#include "engine.hpp"
 #include "primitive.hpp"
 #include "primitive_desc.hpp"
 
@@ -45,10 +46,11 @@ int primitive_desc_t::n_prelu_po_inputs() const {
 }
 
 status_t dnnl_primitive_desc::create_primitive_iface(
-        std::pair<primitive_iface_t *, bool> &primitive_iface) const {
+        std::pair<primitive_iface_t *, bool> &primitive_iface,
+        const cache_blob_t &cache_blob) const {
     // Step 1: create impl::primitive_t or get it from primitive cache
     std::pair<std::shared_ptr<primitive_t>, bool> p;
-    auto status = pd_->create_primitive(p, engine());
+    auto status = pd_->create_primitive(p, engine(), cache_blob);
     if (status != status::success) return status;
     // Step 2: create primitive_iface_t, init and return it to user
     primitive_iface_t *p_iface = nullptr;
@@ -90,10 +92,18 @@ dnnl::impl::engine_t *dnnl_primitive_desc::scratchpad_engine() const {
 
 status_t dnnl_primitive_desc::query(query_t what, int idx, void *result) const {
     auto status = status::success;
-    if (what == query::engine) {
-        *(engine_t **)result = engine();
-    } else {
-        status = pd_->query(what, idx, result);
+    switch (what) {
+        case query::engine: *(engine_t **)result = engine(); break;
+        case query::cache_blob_id_size_s64:
+            *(dim_t *)result = (dim_t)pd_->get_cache_blob_id(engine()).size();
+            break;
+        case query::cache_blob_id:
+            *(const uint8_t **)result = pd_->get_cache_blob_id(engine()).empty()
+                    ? nullptr
+                    : pd_->get_cache_blob_id(engine()).data();
+            break;
+
+        default: status = pd_->query(what, idx, result);
     }
     return status;
 }

@@ -30,6 +30,7 @@
 
 #include "binary/binary.hpp"
 #include "conv/deconv.hpp"
+#include "prelu/prelu.hpp"
 using namespace conv;
 
 namespace deconv {
@@ -212,19 +213,6 @@ void check_known_skipped_case(const prb_t *prb, res_t *res) {
             res);
     if (res->state == SKIPPED) return;
 
-    // GPU:
-    //     * BWD: doesn't support any attributes
-    //     * FWD: support only post ops
-    if (is_gpu()
-            && (((prb->dir & FLAG_BWD) != 0 && !prb->attr.is_def())
-                    || ((prb->dir & FLAG_FWD) != 0
-                            && (!prb->attr.oscale.is_def()
-                                    || !prb->attr.scales.is_def()
-                                    || !prb->attr.zero_points.is_def())))) {
-        res->state = SKIPPED, res->reason = CASE_NOT_SUPPORTED;
-        return;
-    }
-
     if (is_nvidia_gpu()) {
         const int64_t ID = prb->id, IH = prb->ih, IW = prb->iw;
         const int64_t OD = prb->od, OH = prb->oh, OW = prb->ow;
@@ -263,6 +251,25 @@ void check_known_skipped_case(const prb_t *prb, res_t *res) {
         // guilty. Likely Nvidia implementation. Switch it off until further
         // investigation.
         if (prb->dir == BWD_WB) {
+            res->state = SKIPPED, res->reason = CASE_NOT_SUPPORTED;
+            return;
+        }
+    }
+
+    // GPU:
+    //     * BWD: doesn't support any attributes
+    //     * FWD: support only post ops and all but x8s8bf16 cfg
+    if (is_gpu()) {
+        const bool only_non_default_post_ops = prb->attr.oscale.is_def()
+                && prb->attr.scales.is_def() && prb->attr.zero_points.is_def();
+        const bool is_x8s8bf16_cfg
+                = prb->cfg[WEI].dt == dnnl_s8 && prb->cfg[DST].dt == dnnl_bf16;
+        const bool fwd_ok = !is_x8s8bf16_cfg
+                && IMPLICATION(
+                        (prb->dir & FLAG_FWD), only_non_default_post_ops);
+        const bool bwd_ok
+                = IMPLICATION((prb->dir & FLAG_BWD), prb->attr.is_def());
+        if (!fwd_ok || !bwd_ok) {
             res->state = SKIPPED, res->reason = CASE_NOT_SUPPORTED;
             return;
         }
@@ -327,6 +334,11 @@ int doit(const prb_t *prb, res_t *res) {
     SAFE(binary::setup_binary_po(const_pd, binary_po_args, binary_po_dt,
                  binary_po_fp, ref_engine),
             WARN);
+    std::vector<dnn_mem_t> prelu_po_fp, prelu_po_dt;
+    std::vector<int> prelu_po_args;
+    SAFE(prelu::setup_prelu_po(
+                 const_pd, prelu_po_args, prelu_po_fp, prelu_po_dt, ref_engine),
+            WARN);
 
     dnn_mem_t src_fp(src_md, fp, src_tag, ref_engine);
     dnn_mem_t wei_fp(wei_md, fp, wei_tag, ref_engine);
@@ -368,6 +380,7 @@ int doit(const prb_t *prb, res_t *res) {
         args.set(DNNL_ARG_DST, dst_dt);
         args.set(DNNL_ARG_SCRATCHPAD, scratchpad_dt);
         args.set(binary_po_args, binary_po_dt);
+        args.set(prelu_po_args, prelu_po_dt);
         args.set(DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_SRC, src_zero_points_m);
         args.set(DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_DST, dst_zero_points_m);
 
@@ -381,6 +394,7 @@ int doit(const prb_t *prb, res_t *res) {
             ref_args.set(DNNL_ARG_DIFF_WEIGHTS, wei_tr_fp); // Hack. See ref.
             ref_args.set(DNNL_ARG_SCRATCHPAD, scratchpad_fp);
             ref_args.set(binary_po_args, binary_po_fp);
+            ref_args.set(prelu_po_args, prelu_po_fp);
 
             TIME_REF(deconv::compute_ref_fwd(&p_tr, prim_ref, ref_args));
             SAFE(compare_data(prb, DST, dst_dt, dst_fp, res), WARN);

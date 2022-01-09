@@ -24,19 +24,16 @@ namespace impl {
 static setting_t<fpmath_mode_t> default_fpmath {fpmath_mode::strict};
 
 void init_fpmath_mode() {
-    const int len = 10;
-    char val[len];
-    static int fpmath_mode_val = getenv("DNNL_DEFAULT_FPMATH_MODE", val, len);
-    if (fpmath_mode_val > 0) {
-        if (std::strcmp(val, "STRICT") == 0)
-            default_fpmath.set(fpmath_mode::strict, true);
-        if (std::strcmp(val, "BF16") == 0)
-            default_fpmath.set(fpmath_mode::bf16, true);
-        if (std::strcmp(val, "F16") == 0)
-            default_fpmath.set(fpmath_mode::f16, true);
-        if (std::strcmp(val, "ANY") == 0)
-            default_fpmath.set(fpmath_mode::any, true);
+    if (default_fpmath.initialized()) return;
+
+    static std::string val = getenv_string_user("DEFAULT_FPMATH_MODE");
+    if (!val.empty()) {
+        if (val.compare("strict") == 0) default_fpmath.set(fpmath_mode::strict);
+        if (val.compare("bf16") == 0) default_fpmath.set(fpmath_mode::bf16);
+        if (val.compare("f16") == 0) default_fpmath.set(fpmath_mode::f16);
+        if (val.compare("any") == 0) default_fpmath.set(fpmath_mode::any);
     }
+    if (!default_fpmath.initialized()) default_fpmath.set(default_fpmath.get());
 }
 
 status_t check_fpmath_mode(fpmath_mode_t mode) {

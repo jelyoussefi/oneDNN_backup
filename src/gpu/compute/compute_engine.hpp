@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2019-2021 Intel Corporation
+* Copyright 2019-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -48,21 +48,13 @@ public:
 
     const device_info_t *device_info() const { return device_info_.get(); }
 
-    status_t create_kernel(kernel_t *kernel, const char *kernel_name,
-            const kernel_ctx_t &kernel_ctx) const {
-
-        std::vector<kernel_t> kernels(1);
-        auto status = create_kernels(&kernels, {kernel_name}, kernel_ctx);
-        if (status == status::success) *kernel = kernels[0];
-        return status;
-    }
-
     virtual status_t create_kernel(compute::kernel_t *kernel,
-            jit::jit_generator_base &jitter) const = 0;
+            jit::jit_generator_base *jitter, cache_blob_t cache_blob) const = 0;
 
     virtual status_t create_kernels(std::vector<compute::kernel_t> *kernels,
             const std::vector<const char *> &kernel_names,
-            const compute::kernel_ctx_t &kernel_ctx) const = 0;
+            const compute::kernel_ctx_t &kernel_ctx,
+            cache_blob_t cache_blob) const = 0;
 
     virtual status_t create_kernels_from_ocl_source(
             std::vector<compute::kernel_t> *kernels,
@@ -104,6 +96,9 @@ public:
     bool is_gen9() const {
         return device_info_->gpu_arch() == gpu_arch_t::gen9;
     }
+    bool is_gen11() const {
+        return device_info_->gpu_arch() == gpu_arch_t::gen11;
+    }
     bool is_xe_lp() const {
         return device_info_->gpu_arch() == gpu_arch_t::xe_lp;
     }
@@ -112,6 +107,9 @@ public:
     }
     bool is_xe_hpg() const {
         return device_info_->gpu_arch() == gpu_arch_t::xe_hpg;
+    }
+    bool is_xe_hpc() const {
+        return device_info_->gpu_arch() == gpu_arch_t::xe_hpc;
     }
     bool mayiuse_ngen_kernels() {
         return device_info_->mayiuse_ngen_kernels(this);

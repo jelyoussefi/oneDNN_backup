@@ -87,13 +87,34 @@ const char *cross_engine2str(cross_engine_t cross_engine) {
     }
 }
 
+bool prb_t::is_reorder_with_compensation(flag_bit_t flag) const {
+    if (oflag.empty()) return false;
+
+    return std::any_of(oflag.cbegin(), oflag.cend(),
+            [&](const flag_t &oflag) { return (oflag.first & flag); });
+}
+
+dims_t prb_t::get_compensation_dims(flag_bit_t flag) const {
+    dims_t comp_dims;
+    if (is_reorder_with_compensation(flag)) {
+        for (const auto &i_oflag : oflag) {
+            if (i_oflag.first != flag) continue;
+
+            const int mask = i_oflag.second;
+            for (int d = 0; d < ndims; ++d)
+                if (mask & (1 << d)) comp_dims.push_back(dims[d]);
+        }
+    }
+    return comp_dims;
+}
+
 float *prb_t::generate_oscales() {
     const attr_t::scale_t &oscale = this->attr.oscale;
     const int mask = attr_t::get_default_mask(oscale.policy);
 
     int64_t uniq_scales = 1;
     for (int d = 0; d < this->ndims; ++d)
-        if (mask & (1 << d)) uniq_scales *= this->reorder.dims[d];
+        if (mask & (1 << d)) uniq_scales *= this->dims[d];
 
     float *scales = (float *)zmalloc(sizeof(float) * uniq_scales, 64);
     SAFE_V(scales != nullptr ? OK : FAIL);
@@ -122,8 +143,8 @@ std::ostream &operator<<(std::ostream &s, const prb_t &prb) {
 
     s << "--sdt=" << cfg2dt(prb.conf_in) << " ";
     s << "--ddt=" << cfg2dt(prb.conf_out) << " ";
-    s << "--stag=" << prb.reorder.tag_in << " ";
-    s << "--dtag=" << prb.reorder.tag_out << " ";
+    s << "--stag=" << prb.stag << " ";
+    s << "--dtag=" << prb.dtag << " ";
 
     if (canonical || (!prb.oflag.empty() && prb.oflag != def.oflag[0]))
         s << "--oflag=" << prb.oflag << " ";
@@ -133,7 +154,7 @@ std::ostream &operator<<(std::ostream &s, const prb_t &prb) {
         s << "--runtime-dim-mask=" << prb.runtime_dim_mask << " ";
 
     s << prb.attr;
-    s << prb.reorder.dims;
+    s << static_cast<prb_dims_t>(prb);
 
     return s;
 }

@@ -36,6 +36,7 @@ CMAKE_FLAGS := ${CMAKE_FLAGS} \
 TOOLCHAIN_FLAGS = --cuda --cmake-opt=-DCMAKE_PREFIX_PATH="/usr/local/cuda/lib64/stubs/"
 CXX_COMPILER=${TOOLCHAIN_DIR}/llvm/build/bin/clang++
 else
+PATH := /opt/intel/oneapi/compiler/latest/linux/bin/:${PATH}
 CXX_COMPILER=${ONEAPI_ROOT}/compiler/latest/linux/bin/dpcpp
 LD_LIBRARY_PATH=$(shell source ${ONEAPI_ROOT}/setvars.sh --force > \
 	/dev/null 2>&1 && env | grep ^LD_LIBRARY_PATH | awk -F"=" '{print $$2}')
@@ -43,6 +44,8 @@ LD_LIBRARY_PATH=$(shell source ${ONEAPI_ROOT}/setvars.sh --force > \
 endif
 
 CXX_FLAGS="-fsycl -fopenmp -O3 -g "
+
+export PATH
 
 #----------------------------------------------------------------------------------------------------------------------
 # Targets

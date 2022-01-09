@@ -117,7 +117,7 @@ status_t gen_gemm_t::launch_nocopy(const gemm_exec_ctx_t &ctx,
         std::swap(gws[0], gws[1]);
     }
 
-    if (nocopy_info_.fusedEUs && (lws[0] > 1))
+    if (nocopy_info_.fusedEUs() && (lws[0] > 1))
         gws[0] = utils::rnd_up(gws[0], 2);
 
     int last_non_1 = 2;
@@ -125,7 +125,7 @@ status_t gen_gemm_t::launch_nocopy(const gemm_exec_ctx_t &ctx,
             last_non_1--)
         ;
 
-    for (int d = 0; d < 2; d++) {
+    for (int d = 0; d < 3; d++) {
         if (nocopy_info_.fixedWG || (gws[d] > lws[d]))
             gws[d] = utils::rnd_up(gws[d], lws[d]);
         else {
@@ -141,6 +141,12 @@ status_t gen_gemm_t::launch_nocopy(const gemm_exec_ctx_t &ctx,
 
     gemm_linear_order_args(arg_list, argn, lws, gws, m, n, disable_hilbert,
             nocopy_info_, pd()->dev_info_);
+
+    if (nocopy_info_.perKSLM > 0) {
+        size_t slm = nocopy_info_.slm;
+        if (lws[2] > 1) slm = nstl::max(slm, nocopy_info_.perKSLM * lws[2]);
+        arg_list.set(argn++, slm, nullptr);
+    }
 
     lws[0] *= nocopy_info_.subgroupSize;
     gws[0] *= nocopy_info_.subgroupSize;
@@ -194,7 +200,7 @@ status_t gen_gemm_t::execute(const gemm_exec_ctx_t &ctx) const {
     int16_t ao = 0, bo = 0;
     int cmask = 0;
 
-    if (c_type == data_type::s32) {
+    if (pd()->with_c_zero_points()) {
         off_co0 = co->offset() / types::data_type_size(c_type)
                 + pd()->dyn_offset_co;
     } else if (pd()->with_bias()) {
@@ -215,6 +221,11 @@ status_t gen_gemm_t::execute(const gemm_exec_ctx_t &ctx) const {
     }
     if (pd()->with_c_zero_points())
         pd()->attr()->zero_points_.get(DNNL_ARG_DST, nullptr, &cmask, nullptr);
+
+    if (swapab) {
+        uint8_t swap_table[4] = {0, 2, 1, 3};
+        cmask = (cmask & ~3) | swap_table[cmask & 3];
+    }
 
     status_t status;
 
@@ -237,7 +248,7 @@ status_t gen_gemm_t::execute(const gemm_exec_ctx_t &ctx) const {
             block_n, nocopy_info_.wg[1] * nocopy_info_.unroll[1]);
     block_k = utils::rnd_up(block_k, nocopy_info_.unroll[2]);
 
-    int32_t k0 = 0;
+    int32_t k0 = 1;
     if (k_parallel) {
         k0 = block_k;
         block_k = k;

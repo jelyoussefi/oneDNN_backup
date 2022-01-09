@@ -64,7 +64,9 @@ class InterfaceHandler
     template <HW hw> friend class L0CodeGenerator;
 
 public:
-    InterfaceHandler(HW hw_) : hw(hw_), simd(GRF::bytes(hw_) >> 2) {}
+    InterfaceHandler(HW hw_) : hw(hw_), simd(GRF::bytes(hw_) >> 2)
+                             , inlineGRFs(defaultInlineGRFs(hw))
+    {}
 
     inline void externalName(const std::string &name)   { kernelName = name; }
 
@@ -88,6 +90,7 @@ public:
 
     void require32BitBuffers()                           { allow64BitBuffers = false; }
     void requireBarrier()                                { barrierCount = 1; }
+    void requireBarriers(int nBarriers)                  { barrierCount = nBarriers; }
     void requireDPAS()                                   { needDPAS = true; }
     void requireGlobalAtomics()                          { needGlobalAtomics = true; }
     void requireGRF(int grfs)                            { needGRF = grfs; }
@@ -106,6 +109,7 @@ public:
     void requireWorkgroup(size_t x, size_t y = 1,
                           size_t z = 1)                  { wg[0] = x; wg[1] = y; wg[2] = z; }
 
+    void setInlineGRFCount(int grfs)                     { inlineGRFs = grfs; }
     void setSkipPerThreadOffset(int32_t offset)          { offsetSkipPerThread = offset; }
     void setSkipCrossThreadOffset(int32_t offset)        { offsetSkipCrossThread = offset; }
 
@@ -166,9 +170,12 @@ protected:
     size_t wg[3] = {0, 0, 0};
 
     int crossthreadGRFs = 0;
+    int inlineGRFs = 0;
     inline int getCrossthreadGRFs() const;
     inline GRF getCrossthreadBase(bool effective = true) const;
     int grfsPerLID() const { return (simd > 16 && GRF::bytes(hw) < 64) ? 2 : 1; }
+
+    static inline int defaultInlineGRFs(HW hw);
 };
 
 using NEOInterfaceHandler = InterfaceHandler;
@@ -321,6 +328,11 @@ void InterfaceHandler::generateDummyCL(std::ostream &stream) const
     if (needLocalID)        stream << "    (void) ____[get_local_id(0)];\n";
     if (needLocalSize)      stream << "    (void) ____[get_enqueued_local_size(0)];\n";
     if (barrierCount > 0)   stream << "    barrier(CLK_GLOBAL_MEM_FENCE);\n";
+    for (int i = 1; i < barrierCount; i++) {
+        stream << "    local NamedBarrier_t *bar" << i << ";\n"
+                  "    bar" << i << " = named_barrier_init(1);\n"
+                  "    work_group_named_barrier(bar" << i << ", 0);\n";
+    }
     if (needDPAS)           stream << dpasDummy;
     if (needGlobalAtomics)  stream << "    atomic_inc(____);\n";
     if (scratchSize > 0)    stream << "    volatile char scratch[" << scratchSize << "] = {0};\n";
@@ -451,6 +463,13 @@ int InterfaceHandler::getCrossthreadGRFs() const
     return crossthreadGRFs;
 }
 
+int InterfaceHandler::defaultInlineGRFs(HW hw)
+{
+    if (hw == HW::XeHP) return 1;
+    if (hw == HW::XeHPG) return 1;
+    return 0;
+}
+
 template <typename CodeGenerator>
 void InterfaceHandler::generatePrologue(CodeGenerator &generator, const GRF &temp) const
 {
@@ -462,8 +481,8 @@ void InterfaceHandler::generatePrologue(CodeGenerator &generator, const GRF &tem
 #else
     if (needLocalID)
         generator.loadlid(getCrossthreadGRFs(), needLocalID, simd, temp, 12*16);
-    if (getCrossthreadGRFs() > 1)
-        generator.loadargs(getCrossthreadBase().advance(1), getCrossthreadGRFs() - 1, temp);
+    if (getCrossthreadGRFs() > inlineGRFs)
+        generator.loadargs(getCrossthreadBase().advance(inlineGRFs), getCrossthreadGRFs() - inlineGRFs, temp);
 #endif
 }
 

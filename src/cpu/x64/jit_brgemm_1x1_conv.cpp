@@ -108,7 +108,8 @@ status_t brgemm_1x1_convolution_fwd_t<isa>::pd_t::init(engine_t *engine) {
         brgattr.hint_expected_C_size = 0;
         brgattr.wary_tail_read = false;
         const bool is_amx = brgemm_convolution_utils::is_amx(isa);
-        brgattr.use_uker = is_amx && brg.rdb > 1;
+        const bool is_small_mb = jcp_.mb == 1;
+        brgattr.use_uker = is_amx && !is_small_mb && brg.rdb > 1;
         brgattr.use_interleave_stores = brgattr.use_uker;
         CHECK(brgemm_desc_set_attr(&brg, brgattr));
         auto LDD = jcp_.oc_without_padding;
@@ -391,7 +392,7 @@ void brgemm_1x1_convolution_fwd_t<isa>::exec_ker(
                     static_cast<const void *>(bias_w),
                     &oscales[jcp.is_oc_scale * g_oc],
                     post_ops_binary_rhs_arg_vec.data(),
-                    static_cast<size_t>(g_oc)};
+                    static_cast<size_t>(g_oc), 0, dst};
 
             brgemm_kernel_execute_postops(brg_ker, n_ic_blocks, brg_batch,
                     (void *)ptr_C, (void *)ptr_D, post_ops_data,

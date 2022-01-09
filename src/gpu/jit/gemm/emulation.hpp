@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2021 Intel Corporation
+* Copyright 2020-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -31,14 +31,26 @@ struct EmulationStrategy {
     bool emulateDWxDW = false;
     // Use 32-bit adds for 64-bit arithmetic, assuming no 2^32 boundaries crossed.
     bool emulate64_add32 = false;
+    // Emulate DW x DW -> QW multiplication (XeHPC)
+    bool emulate64_mul = false;
+    // Emulate QW and/or/xor operations (XeHPC)
+    bool emulate64_logic = false;
+    // Don't emulate QW shl/shr (XeHPC)
+    bool noemulate64_shift = false;
 
     EmulationStrategy() = default;
-    EmulationStrategy(ngen::HW hw_) {
+    EmulationStrategy(ngen::HW hw_, int stepping = 0) {
         using namespace ngen;
         if (hw_ == HW::Gen11) emulate64 = true;
         if (hw_ >= HW::Gen11) emulateDWxDW = true;
         if (hw_ == HW::Gen12LP) emulate64 = true;
         if (hw_ == HW::XeHPG) emulate64 = true;
+        if (hw_ == HW::XeHPC) {
+            if (stepping >= SteppingPVCXTB0)
+                emulate64_mul = emulate64_logic = true;
+            else
+                emulate64 = noemulate64_shift = true;
+        }
     }
 };
 
@@ -194,8 +206,20 @@ struct EmulationImplementation {
 
         bool dstQ = isQW(dst);
         bool s0Q = isQW(src0);
+        bool s0D = isDW(src0);
 
-        if ((dstQ || s0Q) && strategy.emulate64) {
+        if ((dstQ && s0D) && strategy.emulate64) {
+            if (src0.getNeg()) stub();
+            bool s0Signed = isSigned(src0.getType());
+            RegData dstHi, dstLo;
+            splitToDW(dst, dstLo, dstHi);
+            g.mov(mod, dstLo, src0);
+            if (!s0Signed) {
+                g.mov(mod, dstHi, 0);
+            } else {
+                g.asr(mod, dstHi, dstLo, uint16_t(31));
+            }
+        } else if ((dstQ || s0Q) && strategy.emulate64) {
             if (dstQ != s0Q) stub();
 
             auto mod2x = mod;
@@ -227,18 +251,20 @@ struct EmulationImplementation {
         bool s0Q = isQW(src0);
 
         if ((dstQ || s0Q) && strategy.emulate64) {
-            if (dstQ != s0Q) stub();
+            if (!dstQ) stub();
 
             RegData dstHi, dstLo;
             Immediate s0Hi = 0, s0Lo = 0;
 
             splitToDW(src0, s0Lo, s0Hi);
 
-            if (static_cast<uint64_t>(s0Lo) == static_cast<uint64_t>(s0Hi)) {
+            if (static_cast<uint64_t>(s0Lo) == static_cast<uint64_t>(s0Hi)
+                    && dst.getHS() <= 1) {
                 auto mod2x = mod;
                 mod2x.setExecSize(mod.getExecSize() * 2);
 
                 downgradeToDW(dst);
+                dst.setRegion(0, 0, 1);
                 g.mov(mod2x, dst, s0Lo);
             } else {
                 splitToDW(dst, dstLo, dstHi);
@@ -502,14 +528,14 @@ struct EmulationImplementation {
         bool s1W = isW(src1);
         bool s1D = isDW(src1);
         bool s1Q = isQW(src1);
+        bool s1Immed = std::is_base_of<ngen::Immediate, S1>::value;
 
         bool s0Signed = isSigned(src0.getType());
         bool s1Signed = isSigned(src1.getType());
         auto mulHiType = (s0Signed || s1Signed) ? DataType::d : DataType::ud;
 
         bool emulate64 = strategy.emulate64;
-
-        if (mod.getExecSize() != 1) stub();
+        emulate64 |= strategy.emulate64_mul;
 
         if (s0Q || s1Q) {
             stub();
@@ -528,11 +554,13 @@ struct EmulationImplementation {
                 g.mov(mod, dstHi, 0);
         } else if (dstQ && s0W && s1D) {
             stub();
-        } else if (dstQ && s0D && (s1W || (s1D && emulate64))) {
+        } else if (dstQ && s0D
+                && ((s1W && !s1Immed) || ((s1W || s1D) && emulate64))) {
             RegData dstLo, dstHi;
             splitToDW(dst, dstLo, dstHi);
 
-            auto acc = g.acc0.retype(mulHiType)[dstLo.getOffset()];
+            auto acc = g.acc0.retype(mulHiType)[dstLo.getOffset()](
+                    dstLo.getHS());
 
             g.mul(mod, acc, src0, lowWord(src1));
             if (s1D)
@@ -542,8 +570,8 @@ struct EmulationImplementation {
             g.mov(mod, dstHi, dstLo);
             g.mov(mod, dstLo, acc);
         } else if (dstD && s0D && s1D && strategy.emulateDWxDW) {
-            auto acc = g.acc0.retype(mulHiType)[dst.getOffset()];
-            auto dummy = g.null.retype(mulHiType)[dst.getOffset()];
+            auto acc = g.acc0.retype(mulHiType)[dst.getOffset()](dst.getHS());
+            auto dummy = g.null.retype(mulHiType)[dst.getOffset()](dst.getHS());
 
             g.mul(mod, acc, src0, lowWord(src1));
 
@@ -600,7 +628,7 @@ struct EmulationImplementation {
             return;
         }
 
-        if (dstQ && strategy.emulate64) {
+        if (dstQ && strategy.emulate64 && !strategy.noemulate64_shift) {
             if (src1 >= 32) stub();
 
             RegData dstHi, dstLo, s0Hi, s0Lo;
@@ -646,7 +674,7 @@ struct EmulationImplementation {
             return;
         }
 
-        if (dstQ && strategy.emulate64) {
+        if (dstQ && strategy.emulate64 && !strategy.noemulate64_shift) {
             if (src1 >= 32) stub();
 
             RegData dstHi, dstLo, s0Hi, s0Lo;

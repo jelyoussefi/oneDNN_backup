@@ -105,6 +105,7 @@ int get_os_block(const jit_brgemm_primitive_conf_t &jbgp, bool try_to_adjust,
     if (is_adjustment) max_os_block /= 2;
     int os_block = 1;
     for (int osb = max_os_block; osb >= min_os_block; osb--) {
+        if (osb == 0) break;
         if (jbgp.os % osb == 0) {
             os_block = osb;
             break;
@@ -221,7 +222,14 @@ bool ip_fwd_adjust_thread_balance(const jit_brgemm_primitive_conf_t &jbgp) {
 int ip_fwd_get_adjusted_oc_block(const jit_brgemm_primitive_conf_t &jbgp) {
     const bool is_amx_bf16 = jbgp.isa == avx512_core_bf16_amx_bf16;
 
-    if (!is_amx_bf16) return get_oc_block(jbgp);
+    // we can't change block size on forward and weights update (external)
+    // if layout is set by user, for backward data it can be choosen different
+    // from external in this case because copy routine
+    const bool not_adjustable_oc_block_size
+            = !jbgp.is_wei_layout_any && jbgp.prop_kind != backward_data;
+
+    if (IMPLICATION(is_amx_bf16, not_adjustable_oc_block_size))
+        return get_oc_block(jbgp);
 
     int oc_block = get_oc_block(jbgp, true);
     if (ip_fwd_adjust_thread_balance(jbgp)) {
@@ -298,7 +306,7 @@ status_t init_ip_conf_fwd(jit_brgemm_primitive_conf_t &jbgp,
     // gemm-based inner product performs better when oc = 1
     if (is_f32 && jbgp.oc == 1) return status::unimplemented;
 
-    jbgp.oc_block = get_oc_block(jbgp);
+    jbgp.oc_block = ip_fwd_get_adjusted_oc_block(jbgp);
     jbgp.nb_oc = div_up(jbgp.oc, jbgp.oc_block);
     jbgp.nb_oc_blocking = ip_fwd_get_nb_oc_blocking(jbgp);
 
@@ -703,9 +711,7 @@ status_t init_ip_conf_bwd_w(jit_brgemm_primitive_conf_t &jbgp) {
 
     jbgp.oc_block = has_weights_buffer ? get_oc_block(jbgp)
                                        : ip_fwd_get_adjusted_oc_block(jbgp);
-    jbgp.oc_block_ext = jbgp.is_wei_layout_any
-            ? ip_fwd_get_adjusted_oc_block(jbgp)
-            : get_oc_block(jbgp);
+    jbgp.oc_block_ext = ip_fwd_get_adjusted_oc_block(jbgp);
 
     jbgp.os_block = get_os_block(jbgp, false, false);
     jbgp.nb_os = div_up(jbgp.os, jbgp.os_block);
@@ -731,12 +737,12 @@ status_t init_ip_conf_bwd_w(jit_brgemm_primitive_conf_t &jbgp) {
     jbgp.K_tail = (jbgp.os % jbgp.os_block) + (do_rnd_os ? 1 : 0);
 
     jbgp.nb_os_blocking = 1;
-    int os_blocking_max = (is_amx_bf16)
+    int os_blocking_max = (is_amx_bf16 && jbgp.nb_os >= 64)
             ? (types::data_type_size(jbgp.src_dt) * jbgp.mb * jbgp.ic
                       < platform::get_per_core_cache_size(2))
                     ? 8
                     : 4
-            : 64;
+            : nstl::min(64, jbgp.nb_os);
 
     for (int bl = os_blocking_max; bl >= 1; bl--)
         if (jbgp.nb_os % bl == 0) {
@@ -748,6 +754,9 @@ status_t init_ip_conf_bwd_w(jit_brgemm_primitive_conf_t &jbgp) {
     const bool is_oc_big_2_pow = jbgp.oc >= 512 && math::is_pow2(jbgp.oc);
     const bool is_huge_oc = jbgp.oc >= 4 * 1024;
     jbgp.use_buffer_b = jbgp.dst_dt == bf16 || is_oc_big_2_pow || is_huge_oc;
+    jbgp.harness = jbgp.os >= 5 * (jbgp.ic + jbgp.oc) && jbgp.nb_os >= 256
+            ? harness_mb_reduction
+            : harness_2d_reduction;
 
     int nb_os_blocking, nthr, nthr_mb, nthr_oc, nthr_ic;
     // Caution: thread_balance requires `use_buffer_a` and `use_buffer_b`
@@ -944,11 +953,21 @@ void init_scratchpad(memory_tracking::registrar_t &scratchpad,
     if (jbgp.use_buffer) {
         size_t nelements = (size_t)jbgp.nthr * jbgp.LDC * jbgp.M;
         if (jbgp.prop_kind == dnnl_backward_weights
-                && (jbgp.nthr_mb > 1
-                        || jbgp.isa == avx512_core_bf16_amx_bf16)) {
-            int n_reduction_buffers = jbgp.nthr_mb - (jbgp.wei_dt == f32);
-            nelements = (size_t)n_reduction_buffers * jbgp.nb_ic * jbgp.ic_block
-                    * jbgp.nb_oc * jbgp.oc_block;
+                && (jbgp.nthr_mb > 1 || jbgp.harness == harness_mb_reduction)) {
+            const size_t n_reduction_buffers = jbgp.nthr_mb > 1
+                    ? jbgp.nthr_mb - (jbgp.wei_dt == f32)
+                    : 1;
+            const size_t num_ic_chunks
+                    = div_up(jbgp.nb_ic, jbgp.nb_ic_blocking);
+            const size_t num_oc_chunks
+                    = div_up(jbgp.nb_oc, jbgp.nb_oc_blocking);
+            nelements = (size_t)n_reduction_buffers * num_ic_chunks
+                    * num_oc_chunks * jbgp.nb_ic_blocking * jbgp.nb_oc_blocking
+                    * jbgp.ic_block * jbgp.oc_block;
+        } else if (jbgp.prop_kind == dnnl_backward_weights
+                && jbgp.nthr_mb == 1) {
+            nelements = (size_t)jbgp.nthr * jbgp.nb_ic_blocking * jbgp.ic_block
+                    * jbgp.nb_oc_blocking * jbgp.oc_block;
         } else if (jbgp.prop_kind == dnnl_backward_data && jbgp.nthr_oc_b > 1) {
             const int adj_buffers = (jbgp.src_dt == f32) ? 1 : 0;
             int n_reduction_buffers = jbgp.nthr_oc_b - adj_buffers;

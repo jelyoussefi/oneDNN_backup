@@ -27,15 +27,18 @@ namespace impl {
 namespace gpu {
 
 namespace {
-#define INSTANCE(...) \
+#define CONCAT_INSTANCE(...) \
     impl_list_item_t(impl_list_item_t::concat_type_deduction_helper_t< \
-            __VA_ARGS__::pd_t>())
-const impl_list_item_t concat_impl_list[] = {
-        INSTANCE(ocl::simple_concat_t),
-        INSTANCE(ocl::gen9_concat_t),
-        INSTANCE(ocl::ref_concat_t),
+            __VA_ARGS__::pd_t>()),
+
+// clang-format off
+const impl_list_item_t concat_impl_list[] = REG_CONCAT_P({
+        CONCAT_INSTANCE(ocl::simple_concat_t)
+        CONCAT_INSTANCE(ocl::gen9_concat_t)
+        CONCAT_INSTANCE(ocl::ref_concat_t)
         nullptr,
-};
+});
+// clang-format on
 #undef INSTANCE
 } // namespace
 

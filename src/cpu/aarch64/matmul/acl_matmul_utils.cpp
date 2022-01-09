@@ -82,16 +82,24 @@ status_t init_conf_matmul(acl_matmul_conf_t &amp, memory_desc_t &src_md,
             = arm_compute::TensorInfo(arm_compute::TensorShape(N, M, 1, batch),
                     1, arm_compute::DataType::F32);
 
+    // Fast-math mode
+    auto math_mode = get_fpmath_mode();
+    bool is_fastmath_enabled
+            = one_of(math_mode, fpmath_mode::bf16, fpmath_mode::any);
+    amp.gemm_info.set_fast_math(is_fastmath_enabled);
+
     // Fused ReLU activation
     amp.gemm_info.set_activation_info(get_acl_act(attr));
+
     // Set alpha (output scaling)
     amp.alpha = attr.output_scales_.scales_[0];
+
     // Validate ACL transpose
     if (amp.is_transA) {
         auto acl_transA_st = arm_compute::NETranspose::validate(
                 &amp.src_acc_info, &amp.src_info);
         if (acl_transA_st.error_code() != arm_compute::ErrorCode::OK) {
-            printf("%s\n", acl_transA_st.error_description().c_str());
+            MAYBE_REPORT_ACL_ERROR(acl_transA_st.error_description().c_str());
             return status::unimplemented;
         }
     }
@@ -99,7 +107,7 @@ status_t init_conf_matmul(acl_matmul_conf_t &amp, memory_desc_t &src_md,
         auto acl_transB_st = arm_compute::NETranspose::validate(
                 &amp.wei_acc_info, &amp.wei_info);
         if (acl_transB_st.error_code() != arm_compute::ErrorCode::OK) {
-            printf("%s\n", acl_transB_st.error_description().c_str());
+            MAYBE_REPORT_ACL_ERROR(acl_transB_st.error_description().c_str());
             return status::unimplemented;
         }
     }
@@ -107,7 +115,7 @@ status_t init_conf_matmul(acl_matmul_conf_t &amp, memory_desc_t &src_md,
     auto acl_st = arm_compute::NEGEMM::validate(&amp.src_info, &amp.wei_info,
             nullptr, &amp.dst_info, amp.alpha, 0.0f, amp.gemm_info);
     if (acl_st.error_code() != arm_compute::ErrorCode::OK) {
-        printf("%s\n", acl_st.error_description().c_str());
+        MAYBE_REPORT_ACL_ERROR(acl_st.error_description().c_str());
         return status::unimplemented;
     }
 

@@ -60,10 +60,12 @@ if(DNNL_DPCPP_HOST_COMPILER MATCHES "g\\+\\+")
         append(DPCPP_HOST_COMPILER_OPTS "${CMAKE_CXX_FLAGS_DEBUG}")
     endif()
 
+    # When a custom host compiler is used some deprecation warnings come
+    # from sycl.hpp header. Suppress the warnings for now.
+    append(DPCPP_HOST_COMPILER_OPTS "-Wno-deprecated-declarations")
+
     # SYCL headers contain some comments that trigger warning with GNU compiler
     append(DPCPP_HOST_COMPILER_OPTS "-Wno-comment")
-    # SYCL deprecated some API, suppress warnings
-    append(DPCPP_HOST_COMPILER_OPTS "-Wno-deprecated-declarations")
 
     find_program(GNU_COMPILER NAMES ${DNNL_DPCPP_HOST_COMPILER})
     if(NOT GNU_COMPILER)

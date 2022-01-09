@@ -13,12 +13,12 @@
 
 # Sum with different data type
 --cfg=f32
---attr-post-ops=mul:s8:per_oc+sum:0.25:0:s32+relu:0.5+add:f32:per_tensor
---batch=shapes_2d_ci
+--attr-post-ops=sum:0.25:0:s32
+--batch=shapes_2d
 --batch=shapes_3d
 --cfg=u8s8s8
---attr-post-ops=mul:s8:per_oc+sum:0.25:0:u8+relu:0.5+add:f32:per_tensor
---batch=shapes_2d_ci
+--attr-post-ops=sum:0.25:0:u8
+--batch=shapes_2d
 --batch=shapes_3d
 
 --attr-post-ops=
@@ -33,6 +33,7 @@
 # Zero-points check
 --cfg=s8s8s8,u8s8f32,u8s8bf16
 --attr-zero-points=src:common:1+wei:common:-1+dst:common:2, \
+                   src:common:-1+wei:common:1, \
                    src:per_dim_1:-1*+wei:common:1*+dst:common:2*
 --batch=shapes_2d_ci
 --batch=shapes_3d

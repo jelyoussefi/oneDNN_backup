@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2021 Intel Corporation
+* Copyright 2021-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -63,10 +63,11 @@ struct brgemm_convolution_fwd_t : public primitive_t {
 
         status_t create_primitive(
                 std::pair<std::shared_ptr<primitive_t>, bool> &primitive,
-                engine_t *engine) const override {
+                engine_t *engine,
+                const cache_blob_t &cache_blob) const override {
             return primitive_t::create_primitive_common<
                     brgemm_convolution_fwd_t, pd_t>(
-                    primitive, this, engine, false);
+                    primitive, this, engine, false, cache_blob);
         }
 
         const char *name() const override {
@@ -77,15 +78,17 @@ struct brgemm_convolution_fwd_t : public primitive_t {
         status_t init(engine_t *engine);
 
         int brgs_sz_;
-        std::vector<brgemm_t> brgs_;
+        std::vector<std::shared_ptr<brgemm_t>> brgs_;
         std::vector<std::shared_ptr<std::vector<char>>> bd_masks;
         bool with_sum;
         jit_brgemm_conv_conf_t jcp_;
-        int bs_b, bs_e, bs_s, bs_c; // batch size info for unrolled kernels
+        // batch sizes info for unrolled kernels
+        int bs_c, first_bs;
+        std::vector<int> batchsizes;
         int get_brg_idx(int bs, int m, bool do_initialization, bool is_N_tail,
                 bool is_K_tail) const {
-            auto adj_bs = jcp_.use_uker ? (bs / bs_s) - 1 : 0;
-            return (((m * bs_c + adj_bs) * 2
+            auto bs_idx = jcp_.use_uker ? batchsizes[bs] : 0;
+            return (((m * bs_c + bs_idx) * 2
                             + static_cast<int>(do_initialization))
                                    * 2
                            + static_cast<int>(is_N_tail))
@@ -166,9 +169,9 @@ private:
     void ker_trans(brgemm_thread_ctx_t &btc, char *inp_buffer) const;
     void ker_vpad(brgemm_thread_ctx_t &btc) const;
 
-    void perform_outwork(char *dst_base, char *c_buffer, const char *bias_w,
-            int od, int oh, int ow, int g_oc, bool is_oc_tail, int ker_ow_s,
-            int ker_ow_f, int kd_l, int kh_l,
+    void perform_outwork(char *dst_base, char *dst, char *c_buffer,
+            const char *bias_w, int od, int oh, int ow, int g_oc,
+            bool is_oc_tail, int ker_ow_s, int ker_ow_f, int kd_l, int kh_l,
             const void *post_ops_binary_rhs_arg_vec, bool maybe_do_init,
             bool do_postwork) const;
 
@@ -182,7 +185,7 @@ private:
             int last_n, int last_icc, int last_odb, int last_ohb,
             int last_owb) const;
 
-    status_t add_po_kernel(brgemm_t &bcfg, int ker_idx, bool is_init);
+    status_t add_po_kernel(brgemm_t *bcfg, int ker_idx, bool is_init);
     void add_po_kernels(
             int i_N, int init_bcast_dim, int po_bcast_dim, bool need_postwork);
     status_t add_brg_kernel(int bs, int M, int i_N, int i_K, int i_init);

@@ -124,7 +124,10 @@ public:
                 if (data_elems == 16 && !is_slm()) return false;
                 if (data_type == type_t::hword()) {
                     if (is_slm()) return false;
-                    if (is_write()) { return false; }
+                    if (is_write()) {
+                        if (hw == ngen::HW::XeHPC) return true;
+                        return false;
+                    }
                 }
                 return true;
             }
@@ -137,7 +140,8 @@ public:
                 // Only byte was tested with load/store.
                 if (!is_atomic() && (data_type != type_t::byte())) return false;
                 if (is_atomic() && data_elems > 1) return false;
-                if (is_atomic() && is_a64() && (slots != 8)) return false;
+                if (hw < ngen::HW::XeHPC)
+                    if (is_atomic() && is_a64() && (slots != 8)) return false;
                 return true;
             }
             default: ir_error_not_expected();
@@ -164,7 +168,11 @@ public:
 
     mask_granularity_t mask_granularity() const {
         switch (type) {
-            case message_type_t::block: return mask_granularity_t::per_dword;
+            case message_type_t::block:
+                if (hw >= ngen::HW::XeHPC)
+                    return mask_granularity_t::per_slot;
+                else
+                    return mask_granularity_t::per_dword;
             case message_type_t::scattered:
             case message_type_t::atomic: return mask_granularity_t::per_slot;
             default: ir_error_not_expected();
@@ -172,17 +180,20 @@ public:
         return mask_granularity_t::undef;
     }
 
-    bool is_per_dword_mask() {
+    bool is_per_dword_mask() const {
         return mask_granularity() == mask_granularity_t::per_dword;
     }
-    bool is_per_slot_mask() {
+    bool is_per_slot_mask() const {
         return mask_granularity() == mask_granularity_t::per_slot;
     }
 
     int mask_count() const {
         switch (type) {
             case message_type_t::block:
-                return std::min(16, block_size() / int(sizeof(uint32_t)));
+                if (hw >= ngen::HW::XeHPC)
+                    return slots;
+                else
+                    return std::min(16, block_size() / int(sizeof(uint32_t)));
             case message_type_t::scattered:
             case message_type_t::atomic: return slots;
             default: ir_error_not_expected();
@@ -229,15 +240,27 @@ public:
 
     // Size of the register buffer in bytes.
     int register_size() const {
-        int sz;
-        if (is_transposing()) {
-            sz = data_elems * data_elems_stride();
-        } else {
-            sz = slots * slots_stride();
+        int dw_size = sizeof(uint32_t);
+        int size = 0;
+        for (int i = 0; i < slots; i++) {
+            if (is_per_slot_mask() && i >= eff_mask_count) continue;
+            for (int j = 0; j < data_elems; j++) {
+                for (int k = 0; k < data_type.size(); k += dw_size) {
+                    if (is_per_dword_mask()) {
+                        int off = j * data_type.size() + k;
+                        int mask_idx = (off / dw_size) % 16;
+                        if (mask_idx >= eff_mask_count) continue;
+                    }
+                    int off = 0;
+                    off += i * slots_stride() * data_type.size();
+                    off += j * data_elems_stride() * data_type.size();
+                    off += k;
+                    size = std::max(size, off + 1);
+                }
+            }
         }
-        sz *= data_type.size();
         // Round up to the full register length.
-        return utils::rnd_up(sz, grf_size());
+        return utils::rnd_up(size, grf_size());
     }
 
     // Size of address elements.
@@ -287,6 +310,7 @@ public:
                 break;
             default: ir_error_not_expected(); return func_t();
         }
+        if (!math::is_pow2(new_mask_count)) return func_t();
         return send_t::make(hw, access_type, type, data_type, data_elems, slots,
                 alignment, address_model, atomic_op, is_prefetch,
                 new_mask_count);
@@ -440,7 +464,11 @@ public:
                         continue;
                     for (auto &message_type : message_types) {
                         auto f = send_t::make(hw, access_type, message_type,
-                                data_type, elems, slots, type_t::undef(),
+                                data_type, elems, slots,
+                                utils::one_of(data_type, type_t::oword(),
+                                        type_t::hword())
+                                        ? data_type
+                                        : type_t::undef(),
                                 address_model, atomic_op, is_prefetch, -1);
                         if (!f.template as<send_t>().is_supported()) continue;
                         if (!filter(f)) continue;

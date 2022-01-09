@@ -177,7 +177,29 @@ protected:
 
         for (size_t i = 0; i < num_srcs; i++) {
             auto desc = memory::desc(p.dims, src_data_type, p.srcs_format[i]);
-            auto src_memory = test::make_memory(desc, eng);
+            srcs_md.push_back(desc);
+        }
+
+        memory dst;
+        sum::primitive_desc sum_pd;
+
+        if (p.is_output_omitted) {
+            ASSERT_NO_THROW(
+                    sum_pd = sum::primitive_desc(p.scale, srcs_md, eng));
+        } else {
+            auto dst_desc = memory::desc(p.dims, dst_data_type, p.dst_format);
+            sum_pd = sum::primitive_desc(dst_desc, p.scale, srcs_md, eng);
+
+            ASSERT_EQ(sum_pd.dst_desc().data.ndims, dst_desc.data.ndims);
+        }
+        dst = test::make_memory(sum_pd.dst_desc(), eng);
+        // test construction from a C pd
+        sum_pd = sum::primitive_desc(sum_pd.get());
+        for (size_t i = 0; i < num_srcs; i++) {
+            if (p.srcs_format[i] != memory::format_tag::any) {
+                ASSERT_TRUE(srcs_md[(int)i] == sum_pd.src_desc((int)i));
+            }
+            auto src_memory = test::make_memory(sum_pd.src_desc((int)i), eng);
             const size_t sz
                     = src_memory.get_desc().get_size() / sizeof(src_data_t);
             fill_data<src_data_t>(sz, src_memory);
@@ -196,25 +218,8 @@ protected:
                     *((uint_type *)&src_ptr[i]) &= mask;
                 }
             }
-            srcs_md.push_back(desc);
             srcs.push_back(src_memory);
         }
-
-        memory dst;
-        sum::primitive_desc sum_pd;
-
-        if (p.is_output_omitted) {
-            ASSERT_NO_THROW(
-                    sum_pd = sum::primitive_desc(p.scale, srcs_md, eng));
-        } else {
-            auto dst_desc = memory::desc(p.dims, dst_data_type, p.dst_format);
-            sum_pd = sum::primitive_desc(dst_desc, p.scale, srcs_md, eng);
-
-            ASSERT_EQ(sum_pd.dst_desc().data.ndims, dst_desc.data.ndims);
-        }
-        dst = test::make_memory(sum_pd.dst_desc(), eng);
-        // test construction from a C pd
-        sum_pd = sum::primitive_desc(sum_pd.get());
 
         ASSERT_TRUE(sum_pd.query_md(query::exec_arg_md, DNNL_ARG_DST)
                 == sum_pd.dst_desc());
@@ -230,6 +235,7 @@ protected:
             dnnl::impl::parallel_nd(
                     (ptrdiff_t)sz, [&](ptrdiff_t i) { dst_data[i] = -32; });
         }
+        EXPECT_ANY_THROW(sum(sum_pd, {}));
         sum c(sum_pd);
         std::unordered_map<int, memory> args = {{DNNL_ARG_DST, dst}};
         for (int i = 0; i < (int)num_srcs; i++) {
@@ -318,7 +324,11 @@ static auto special_test_cases = []() {
             sum_test_params {{tag::nchw, tag::nChw8c}, tag::nchw, {1, 8, 4, 4},
                     {1.0f}, false, true, dnnl_invalid_arguments},
             sum_test_params {{tag::nchw, tag::nChw8c}, tag::nchw, {2, 8, 4, 4},
-                    {0.1f}, false, true, dnnl_invalid_arguments});
+                    {0.1f}, false, true, dnnl_invalid_arguments},
+            sum_test_params {{tag::any, tag::nchw}, tag::nchw, {1, 16, 1, 1},
+                    {2.0f, 3.0f}, false, true, dnnl_invalid_arguments},
+            sum_test_params {{tag::nchw, tag::any}, tag::nchw, {1, 16, 1, 1},
+                    {2.0f, 3.0f}, false, true, dnnl_invalid_arguments});
 };
 
 /* corner cases */

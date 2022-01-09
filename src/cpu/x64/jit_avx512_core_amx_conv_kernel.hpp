@@ -324,9 +324,6 @@ private:
     const Xbyak::Reg64 &reg_oc_blocks = rax;
     const Xbyak::Reg64 &reg_tmp = r8;
 
-    /* binary post-ops operand */
-    const Xbyak::Reg64 &out_off_oprnd = reg_tmp;
-
     const Xbyak::Opmask &ktail_mask = k2;
 
     const Xbyak::Zmm &zmm_bias = zmm31;
@@ -390,7 +387,9 @@ private:
             const bool mask_flag);
     void apply_postops(const Xbyak::Zmm &zmm_out, const float *p_sum_scale,
             const int32_t *p_sum_zp, const Xbyak::Address &addr,
-            const bool mask_flag, const size_t off, const int ocb);
+            const size_t off, const bool mask_flag);
+    inline void store_output_ymm_bf16(
+            const int idx, const Xbyak::Address &addr, const bool mask_flag);
     void store_output_vector_bf16(
             const Xbyak::Zmm &zmm_out, int ocb, int h, int w);
     void store_output_vector_int8(const Xbyak::Zmm &zmm_out, int ocb, int h,
@@ -442,10 +441,11 @@ private:
     // variables
     const reg64_t &reg_khp = r10; // kh padding
     const reg64_t &reg_tov = r9; // top overflow
-    const reg64_t &reg_bov = r8; // bottom overflow
+    const reg64_t &reg_bov = reg_tov; // bottom overflow
     const reg64_t &reg_kwp = rax; // kw padding
     const reg64_t &reg_lov = rbx; // left overflow
     const reg64_t &reg_rov = abi_not_param1; // right overflow
+    const reg64_t &reg_kd = r8; // 3d filter
 
     // counters
     const reg64_t &reg_cnt_khp = rdx;
@@ -461,6 +461,7 @@ private:
 
     void generate() override;
     void copy_row(bool is_masked);
+    void kd_loop(bool is_masked);
 };
 
 struct jit_avx512_core_amx_bwd_data_kernel_t : public jit_generator {
@@ -516,6 +517,9 @@ private:
     bool is_store_done_ = false;
     bool is_buffer_empty_ = true;
 
+    bool is_store_done_save_ = false;
+    int prv_width_save_ = 0;
+
     /* data regs */
     const Xbyak::Reg64 &reg_inp_ptr = r15;
     const Xbyak::Reg64 &reg_wei_ptr = r14;
@@ -532,9 +536,9 @@ private:
     const Xbyak::Reg64 &reg_inp_stride = rbx;
     const Xbyak::Reg64 &reg_wei_stride = rdx;
 
-    // rsi - free and available
     // rbp - reserved for EVEX compression
     const Xbyak::Reg64 &reg_last_h = abi_not_param1;
+    const Xbyak::Reg64 &reg_kd = rsi;
 
     // temporary, used in generate() function only
     const Xbyak::Reg64 &reg_ic_blocks = rax;
@@ -549,16 +553,17 @@ private:
     const Xbyak::Zmm &zmm_sum_zp = zmm28;
 
     // AUX: Steps, shifts and offsets
-    size_t get_inp_kh_step() const;
     size_t get_inp_ocb_step() const;
     size_t get_inp_offset(int ihb, int kh, int kw) const;
     size_t get_inp_shift() const;
+    size_t get_inp_d_step() const;
     size_t get_out_icb_offset(int ihb, int icb) const;
     size_t get_out_row_offset(int ihb, int icb, int j) const;
     size_t get_out_shift(int width) const;
     size_t get_wei_kh_step() const;
     size_t get_wei_ocb_step() const;
     size_t get_wei_offset(int icb, int kh, int kw) const;
+    size_t get_wei_d_step() const;
     size_t get_wsp_icb_offset(int ihb, int icb) const;
     size_t get_wsp_row_offset(int ihb, int icb, int j) const;
     size_t get_wsp_shift() const;
@@ -566,6 +571,11 @@ private:
     int get_out_tensor(int h, int i) const;
     int get_inp_tensor(int h) const;
     int get_wei_tensor(int i) const;
+
+    inline bool gaps_in_store() {
+        const int gen_kd = (jcp.kd - 1) * (jcp.dilate_d + 1) + 1;
+        return gen_kd < jcp.stride_d || jcp.dilate_d > 0;
+    }
 
     void prepare_output();
     void init_runtime_counters(bool start_with_last_tile_block);
@@ -585,8 +595,10 @@ private:
     void store_output_vector(
             const Xbyak::Zmm &zmm_out, int icb, int ih, int iw);
     void store_output(int width, bool do_store);
+    void skipped_interleave_store();
     void interleave_store(int width);
-    void compute_ocb_loop(int width, bool do_store);
+    void compute_ocb_loop(int width, bool do_interleave_store);
+    void compute_kd_loop(int width, bool do_store, bool handle_skipped_stores);
     void compute_iw_loop();
 
     void generate() override;

@@ -40,6 +40,11 @@ set(CMAKE_CCXX_NOWARN_FLAGS)
 set(CMAKE_CCXX_NOEXCEPT_FLAGS)
 set(DEF_ARCH_OPT_FLAGS)
 
+# Compatibility with DNNL
+if($ENV{ONEDNN_WERROR})
+    set(DNNL_WERROR $ENV{ONEDNN_WERROR})
+endif()
+
 if($ENV{DNNL_WERROR})
     set(DNNL_WERROR $ENV{DNNL_WERROR})
 endif()
@@ -78,13 +83,13 @@ macro(platform_gnu_nowarn_ccxx_flags var gnu_version)
 endmacro()
 
 if(DNNL_WITH_SYCL)
-    # XXX: SYCL deprecated some API, suppress warnings for now.
-    append(CMAKE_CCXX_FLAGS "-Wno-deprecated-declarations")
     # Clang cannot vectorize some loops with #pragma omp simd and gets
     # very upset. Tell it that it's okay and that we love it
     # unconditionally.
     append(CMAKE_CCXX_NOWARN_FLAGS "-Wno-pass-failed")
-
+    # Suppress self-comparison warning to avoid false positives in macros such
+    # as JIT_IMPL_NAME_HELPER. 
+    append(CMAKE_CCXX_NOWARN_FLAGS "-Wno-tautological-compare")
     if(WIN32)
         # XXX: SYCL does not like __thiscall convention coming from TBB,
         # suppress warnings for now.
@@ -93,7 +98,7 @@ if(DNNL_WITH_SYCL)
         # this is fixed we have to explicitly drop release C++ runtime for
         # debug build types.
         string(TOUPPER "${CMAKE_BUILD_TYPE}" UPPERCASE_CMAKE_BUILD_TYPE)
-        if(UPPERCASE_CMAKE_BUILD_TYPE MATCHES "(DEBUG|RELWITHMDD)")
+        if(UPPERCASE_CMAKE_BUILD_TYPE MATCHES "(DEBUG|RELWITHMDD)" AND NOT CMAKE_BASE_NAME MATCHES "(icx|icpx)")
             append(CMAKE_EXE_LINKER_FLAGS "-Xlinker /NODEFAULTLIB:msvcrt")
             append(CMAKE_SHARED_LINKER_FLAGS "-Xlinker /NODEFAULTLIB:msvcrt")
         endif()

@@ -25,8 +25,9 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <string>
+
 #include <memory>
-#include <mutex>
 #include <string>
 #include <tuple>
 
@@ -317,6 +318,12 @@ inline typename remove_reference<T>::type rnd_up_pow2(const T a) {
     }
 }
 
+template <typename T>
+inline typename remove_reference<T>::type rnd_down_pow2(const T a) {
+    auto ret = rnd_up_pow2(a);
+    return ret == a ? ret : ret / 2;
+}
+
 template <typename T, typename U>
 inline typename remove_reference<T>::type max_div(const T a, const U b) {
     U div = b;
@@ -519,10 +526,14 @@ inline void l_dims_by_l_offset(
     }
 }
 
-inline int get_dims_mask(const dims_t dims1, const dims_t dims2, int ndims) {
+inline int get_dims_mask(const dims_t dims1, const dims_t dims2, int ndims,
+        bool skip_dim_of_one = false) {
     int mask = 0;
-    for (int d = 0; d < ndims; ++d)
-        mask += dims1[d] == dims2[d] ? (1 << d) : 0;
+    for (int d = 0; d < ndims; ++d) {
+        // Disable mask_bit for dimensions of `1` by request.
+        int mask_bit = skip_dim_of_one && dims1[d] == 1 ? 0 : (1 << d);
+        mask += dims1[d] == dims2[d] ? mask_bit : 0;
+    }
     return mask;
 };
 
@@ -572,8 +583,17 @@ inline void yield_thread() {}
 // retrieve the length of the environment variable value string.
 //
 int getenv(const char *name, char *buffer, int buffer_size);
-// Reads an integer from the environment
+// Reads an integer from the environment. For internal needs.
 int getenv_int(const char *name, int default_value = 0);
+// Reads an integer from user environment. Takes a var name without
+// prefix and checks both supported variants - with "ONEDNN_" (primary) and
+// "DNNL_" (secondary) prefixes.
+int getenv_int_user(const char *name, int default_value = 0);
+// Reads a string literal from user environment. Takes a var name without
+// prefix and checks both supported variants - with "ONEDNN_" (primary) and
+// "DNNL_" (secondary) prefixes.
+std::string getenv_string_user(const char *name);
+
 // Various getter for profiling info
 bool get_jit_dump();
 unsigned get_jit_profiling_flags();
@@ -597,33 +617,20 @@ inline void msan_unpoison(void *ptr, size_t size) {
 }
 
 // std::optional? std::maybe? std::whatever
-
-// Since std::string is not TriviallyCopyable, value_ cannot be declared as
-// std::atomic. So, guard access to value_ using a mutex.
-// The set() method has a 'soft' mode where value_ is set only if it is
-// uninitialized.
 template <typename T>
 struct setting_t {
 private:
     T value_;
-    std::atomic<bool> initialized_;
-    std::mutex m_;
+    bool initialized_;
 
 public:
     setting_t() : initialized_ {false} {}
     setting_t(const T init) : value_ {init}, initialized_ {false} {}
-    T get() {
-        std::lock_guard<std::mutex> g(m_);
-        return value_;
-    }
-    void set(T new_value, bool soft = false) {
-        std::lock_guard<std::mutex> g(m_);
-        bool expected = false;
-        if (IMPLICATION(soft,
-                    initialized_.compare_exchange_strong(expected, false))) {
-            value_ = new_value;
-            initialized_ = true;
-        }
+    bool initialized() { return initialized_; }
+    T get() { return value_; }
+    void set(T new_value) {
+        value_ = new_value;
+        initialized_ = true;
     }
     DNNL_DISALLOW_COPY_AND_ASSIGN(setting_t);
 };

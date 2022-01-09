@@ -88,7 +88,8 @@ struct ref_sum_t : public gpu_primitive_t {
         const size_t n = pd()->reorder_pds_.size();
         reorders_.resize(n);
         for (size_t i = 0; i < n; ++i) {
-            pd()->reorder_pds_[i]->create_primitive(reorders_[i], engine);
+            CHECK(create_nested_primitive(
+                    reorders_[i], pd()->reorder_pds_[i], engine));
         }
         return status::success;
     }
@@ -138,15 +139,6 @@ struct ref_sum_t : public gpu_primitive_t {
         }
 
         return status::success;
-    }
-
-protected:
-    primitive_list_t nested_primitives() const override {
-        std::vector<const primitive_t *> _reorders;
-        _reorders.reserve(reorders_.size());
-        for (const auto &r : reorders_)
-            _reorders.push_back(r.get());
-        return _reorders;
     }
 
 private:

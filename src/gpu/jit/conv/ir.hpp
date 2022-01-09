@@ -22,8 +22,8 @@
 #include <thread>
 #include <vector>
 
+#include "common/optional.hpp"
 #include "gpu/jit/conv/ir_core.hpp"
-
 namespace dnnl {
 namespace impl {
 namespace gpu {
@@ -189,238 +189,6 @@ private:
     }
 };
 
-// Helper class to mutate IR tree.
-class ir_mutator_t {
-public:
-    using dispatch_func_type
-            = object_t (*)(ir_mutator_t *, const object_impl_t &);
-
-    virtual ~ir_mutator_t() = default;
-
-    virtual object_t mutate(const object_t &obj) {
-        return dispatch(obj.impl());
-    }
-
-    template <typename T>
-    std::vector<T> mutate(const std::vector<T> &v) {
-        std::vector<T> new_v;
-        for (auto &e : v)
-            new_v.push_back(mutate(e));
-        return new_v;
-    }
-
-    // To catch missing _mutate() handlers ir ir_mutator_t.
-    object_t _mutate(const object_impl_t &obj) {
-        ir_error_not_expected() << "Can't handle type: " << object_t(obj);
-        return {};
-    }
-
-#define DECL_MUTATE_LEAF(name) \
-    virtual object_t _mutate(const name &obj) { return obj; }
-
-    DECL_MUTATE_LEAF(bool_imm_t)
-    DECL_MUTATE_LEAF(float_imm_t)
-    DECL_MUTATE_LEAF(func_impl_t)
-    DECL_MUTATE_LEAF(int_imm_t)
-    DECL_MUTATE_LEAF(var_t)
-
-#undef DECL_MUTATE_LEAF
-
-    virtual object_t _mutate(const alloc_t &obj) {
-        auto buf = mutate(obj.buf);
-        auto body = mutate(obj.body);
-
-        if (buf.is_same(obj.buf) && body.is_same(obj.body)) return obj;
-
-        return alloc_t::make(buf, obj.size, obj.kind, obj.attr, body);
-    }
-
-    virtual object_t _mutate(const binary_op_t &obj) {
-        auto a = mutate(obj.a);
-        auto b = mutate(obj.b);
-
-        if (a.is_same(obj.a) && b.is_same(obj.b)) return obj;
-
-        return binary_op_t::make(obj.op_kind, a, b);
-    }
-
-    virtual object_t _mutate(const cast_t &obj) {
-        auto expr = mutate(obj.expr);
-
-        if (expr.is_same(obj.expr)) return obj;
-
-        return cast_t::make(obj.type, expr, obj.saturate);
-    }
-
-    virtual object_t _mutate(const for_t &obj) {
-        auto var = mutate(obj.var);
-        auto init = mutate(obj.init);
-        auto bound = mutate(obj.bound);
-        auto body = mutate(obj.body);
-
-        if (var.is_same(obj.var) && init.is_same(obj.init)
-                && bound.is_same(obj.bound) && body.is_same(obj.body))
-            return obj;
-
-        return for_t::make(var, init, bound, body, obj.unroll);
-    }
-
-    virtual object_t _mutate(const func_call_t &obj) {
-        auto func = mutate(obj.func);
-        auto args = mutate(obj.args);
-
-        if (func.is_same(obj.func) && ir_utils::is_same(args, obj.args))
-            return obj;
-
-        return func_call_t::make(func, args, obj.attr);
-    }
-
-    virtual object_t _mutate(const if_t &obj) {
-        auto cond = mutate(obj.cond);
-        auto body = mutate(obj.body);
-        auto else_body = mutate(obj.else_body);
-
-        if (cond.is_same(obj.cond) && body.is_same(obj.body)
-                && else_body.is_same(obj.else_body))
-            return obj;
-
-        return if_t::make(cond, body, else_body);
-    }
-
-    virtual object_t _mutate(const iif_t &obj) {
-        auto cond = mutate(obj.cond);
-        auto true_expr = mutate(obj.true_expr);
-        auto false_expr = mutate(obj.false_expr);
-
-        if (cond.is_same(obj.cond) && true_expr.is_same(obj.true_expr)
-                && false_expr.is_same(obj.false_expr))
-            return obj;
-
-        return iif_t::make(cond, true_expr, false_expr);
-    }
-
-    virtual object_t _mutate(const let_t &obj) {
-        auto var = mutate(obj.var);
-        auto value = mutate(obj.value);
-        auto body = mutate(obj.body);
-
-        if (var.is_same(obj.var) && value.is_same(obj.value)
-                && body.is_same(obj.body))
-            return obj;
-
-        return let_t::make(var, value, body);
-    }
-
-    virtual object_t _mutate(const load_t &obj) {
-        auto buf = mutate(obj.buf);
-        auto off = mutate(obj.off);
-
-        if (buf.is_same(obj.buf) && off.is_same(obj.off)) return obj;
-
-        return load_t::make(obj.type, buf, off, obj.stride);
-    }
-
-    virtual object_t _mutate(const ptr_t &obj) {
-        auto base = mutate(obj.base);
-        auto off = mutate(obj.off);
-
-        if (base.is_same(obj.base) && off.is_same(obj.off)) return obj;
-
-        return ptr_t::make(base, off);
-    }
-
-    virtual object_t _mutate(const shuffle_t &obj) {
-        auto vec = mutate(obj.vec);
-
-        if (ir_utils::is_same(vec, obj.vec)) return obj;
-
-        return shuffle_t::make(vec, obj.idx);
-    }
-
-    virtual object_t _mutate(const stmt_group_t &obj) {
-        auto body = mutate(obj.body);
-
-        if (body.is_same(obj.body)) return obj;
-
-        return stmt_group_t::make(obj.label, body);
-    }
-
-    virtual object_t _mutate(const stmt_seq_t &obj) {
-        auto head = mutate(obj.head);
-        auto tail = mutate(obj.tail);
-
-        if (head.is_same(obj.head) && tail.is_same(obj.tail)) return obj;
-
-        return stmt_seq_t::make(head, tail);
-    }
-
-    virtual object_t _mutate(const store_t &obj) {
-        auto buf = mutate(obj.buf);
-        auto off = mutate(obj.off);
-        auto value = mutate(obj.value);
-        auto mask = mutate(obj.mask);
-
-        if (buf.is_same(obj.buf) && off.is_same(obj.off)
-                && value.is_same(obj.value) && mask.is_same(obj.mask))
-            return obj;
-
-        return store_t::make(buf, off, value, obj.stride, mask);
-    }
-
-    virtual object_t _mutate(const ternary_op_t &obj) {
-        auto a = mutate(obj.a);
-        auto b = mutate(obj.b);
-        auto c = mutate(obj.c);
-
-        if (a.is_same(obj.a) && b.is_same(obj.b) && c.is_same(obj.c))
-            return obj;
-
-        return ternary_op_t::make(obj.op_kind, a, b, c);
-    }
-
-    virtual object_t _mutate(const unary_op_t &obj) {
-        auto a = mutate(obj.a);
-        if (a.is_same(obj.a)) return obj;
-        return unary_op_t::make(obj.op_kind, a);
-    }
-
-    virtual dispatch_func_type find_dispatch_func(int64_t ti) const {
-        return ti < num_dispatch_funcs ? dispatch_funcs()[ti] : nullptr;
-    }
-
-private:
-    static const int64_t num_dispatch_funcs
-            = ir_type_id_t::end_visitable_ir_objects;
-    static std::array<dispatch_func_type, num_dispatch_funcs> &
-    dispatch_funcs() {
-        static std::array<dispatch_func_type, num_dispatch_funcs>
-                _dispatch_funcs;
-        std::once_flag initialized;
-        std::call_once(initialized, [&]() {
-#define HANDLE_IR_OBJECT(type) \
-    _dispatch_funcs[type::_dispatch_type_id()] = &call<type>;
-            HANDLE_ALL_IR_OBJECTS()
-
-#undef HANDLE_IR_OBJECT
-        });
-        return _dispatch_funcs;
-    }
-
-    template <typename T>
-    static object_t call(ir_mutator_t *mutator, const object_impl_t &obj) {
-        return mutator->_mutate((const T &)obj);
-    }
-
-    object_t dispatch(const object_impl_t *obj) {
-        if (!obj) return obj;
-
-        auto ti = obj->dispatch_type_id();
-        auto f = find_dispatch_func(ti);
-        ir_assert(f);
-        return f(this, *obj);
-    }
-};
-
 class ir_context_t {
 public:
     expr_t create_tmp_var(
@@ -443,6 +211,12 @@ public:
         MAYBE_UNUSED(ret);
     }
 
+    void add_attr(const expr_t &buf, const alloc_attr_t &attr) {
+        auto ret = attrs_.insert({buf, attr});
+        ir_assert(ret.second) << buf;
+        MAYBE_UNUSED(ret);
+    }
+
     void remove(const expr_t &buf) {
         auto ret = removes_.insert(buf);
         ir_assert(ret.second) << buf;
@@ -454,8 +228,12 @@ public:
     object_t _mutate(const alloc_t &obj) override {
         auto new_obj = ir_mutator_t::_mutate(obj);
 
+        // If removal succeeds, stop any further updates.
         if (try_remove(new_obj)) return new_obj;
-        if (try_resize(new_obj)) return new_obj;
+
+        // Otherwise try to apply other modifications one by one.
+        try_resize(new_obj);
+        try_add_attr(new_obj);
 
         return new_obj;
     }
@@ -477,14 +255,40 @@ private:
         if (it == resizes_.end()) return false;
 
         obj = alloc_t::make(
-                alloc.buf, it->second, alloc.kind, alloc.attr, alloc.body);
+                alloc.buf, it->second, alloc.kind, alloc.attrs, alloc.body);
         resizes_.erase(it);
+        return true;
+    }
+
+    bool try_add_attr(object_t &obj) {
+        auto &alloc = obj.as<alloc_t>();
+        auto it = attrs_.find(alloc.buf);
+        if (it == attrs_.end()) return false;
+
+        auto new_attrs = alloc.attrs;
+        new_attrs.push_back(it->second);
+
+        obj = alloc_t::make(
+                alloc.buf, alloc.size, alloc.kind, new_attrs, alloc.body);
+        attrs_.erase(it);
         return true;
     }
 
     object_set_t<expr_t> removes_;
     object_map_t<expr_t, int> resizes_;
+    object_map_t<expr_t, alloc_attr_t> attrs_;
 };
+
+// Returns a new statement with injected buffer allocations from `allocs`.
+// - If put_innermost is false, then `stmt` is nested to all allocations
+// - If put_innermost is true, then every allocation is injected as innermost
+//   as possible
+stmt_t inject_alloc_stmts(const stmt_t &stmt, const std::vector<stmt_t> &allocs,
+        bool put_innermost = false);
+
+// Returns a new statement with injected let statements, `stmt` is nested to
+// all let statements.
+stmt_t inject_let_stmts(const stmt_t &stmt, const std::vector<stmt_t> &lets);
 
 template <typename T>
 struct expr_cast_helper_t {
@@ -535,9 +339,6 @@ expr_t const_fold_non_recursive(const expr_t &e);
 
 template <typename T>
 std::vector<object_t> find_objects(const object_t &root);
-
-template <typename T>
-std::vector<object_t> find_objects_unique(const object_t &root);
 
 class alloc_manager_t {
 public:
@@ -624,8 +425,6 @@ bool is_const_broadcast(const expr_t &e);
 
 bool is_const_broadcast(const expr_t &e, const expr_t &value);
 
-bool all_of(const expr_t &e, const expr_t &value);
-
 expr_t make_buffer(const std::string &name);
 
 // Utility functions for nary_op_t.
@@ -707,7 +506,11 @@ std::vector<stmt_t> find_stmt_groups(
 
 // Returns a statement group matching the label. `root` must have exactly one
 // occurrence.
-stmt_t find_stmt_group(const object_t &root, const stmt_label_t &label);
+utils::optional_t<stmt_t> find_stmt_group(
+        const object_t &root, const stmt_label_t &label);
+
+// Removes all statement groups matching the label.
+object_t remove_stmt_group(const object_t &root, stmt_label_t label);
 
 class scope_visitor_t : public ir_visitor_t {
 public:
@@ -886,9 +689,73 @@ inline std::ostream &operator<<(std::ostream &out, const modulus_info_t &mod) {
     return out;
 }
 
+// Helper class to find constant bounds of integer expressions based on known
+// relations.
+class bound_finder_base_t {
+public:
+    int64_t find_low_bound(const expr_t &e) const {
+        return find_bound_impl(e, /*is_low=*/true);
+    }
+
+    int64_t find_high_bound(const expr_t &e) const {
+        return find_bound_impl(e, /*is_low=*/false);
+    }
+
+    virtual int64_t get_var_bound(const expr_t &e, bool is_low) const = 0;
+
+    static int64_t unlimited_bound(bool is_low) {
+        if (is_low) return std::numeric_limits<int64_t>::min();
+        return std::numeric_limits<int64_t>::max();
+    }
+
+    static bool is_good_bound(int64_t bound) {
+        if (bound == unlimited_bound(true)) return false;
+        if (bound == unlimited_bound(false)) return false;
+        return true;
+    }
+
+protected:
+    // If is_low is true, searches for proven low bound, and high bound
+    // otherwise.
+    virtual int64_t find_bound_impl(const expr_t &e, bool is_low) const;
+};
+
+class bound_finder_t : public bound_finder_base_t {
+public:
+    bound_finder_t(
+            const object_map_t<expr_t, std::vector<relation_t>> &relations)
+        : relations_(relations) {}
+
+    int64_t get_var_bound(const expr_t &e, bool is_low) const override {
+        ir_assert(is_var(e));
+        int64_t def_bound = unlimited_bound(is_low);
+        auto it = relations_.find(e);
+        if (it == relations_.end()) return def_bound;
+
+        int64_t ret = def_bound;
+        for (auto &rel : it->second) {
+            bool is_ge = (rel.op_kind() == op_kind_t::_ge);
+            if (is_ge != is_low) continue;
+            if (is_ge) {
+                ret = std::max(to_cpp<int64_t>(rel.rhs()), ret);
+            } else {
+                ret = std::min(to_cpp<int64_t>(rel.rhs()), ret);
+            }
+        }
+        return ret;
+    }
+
+private:
+    object_map_t<expr_t, std::vector<relation_t>> relations_;
+};
+
 // TODO: Add integers check (only integers can be constrained).
 class constraint_set_t {
 public:
+    const object_map_t<expr_t, std::vector<relation_t>> &relations() const {
+        return relations_;
+    }
+
     void add_constraint(const expr_t &e);
 
     bool can_prove(const expr_t &e, bool try_simplify = true) const {
@@ -927,11 +794,63 @@ private:
         return false;
     }
 
+    bool try_prove_compound_relation(const expr_t &e) const {
+        auto *binary = e.as_ptr<binary_op_t>();
+        if (!binary) return false;
+
+        auto op_kind = binary->op_kind;
+        auto &a = binary->a;
+        auto &_b = binary->b;
+
+        if (!is_const(_b)) return false;
+
+        auto b = to_cpp<int64_t>(_b);
+
+        // Normalize operation kind.
+        switch (op_kind) {
+            case op_kind_t::_ge:
+            case op_kind_t::_le: break;
+            case op_kind_t::_gt:
+                op_kind = op_kind_t::_ge;
+                ir_assert(b < std::numeric_limits<int64_t>::max());
+                b += 1;
+                break;
+            case op_kind_t::_lt:
+                op_kind = op_kind_t::_le;
+                ir_assert(b > std::numeric_limits<int64_t>::min());
+                b -= 1;
+                break;
+            default: return false;
+        }
+
+        bound_finder_t finder(relations_);
+        if (op_kind == op_kind_t::_ge) {
+            auto lo = finder.find_low_bound(a);
+            if (!bound_finder_t::is_good_bound(lo)) return false;
+            return lo >= b;
+        }
+
+        if (op_kind == op_kind_t::_le) {
+            auto hi = finder.find_high_bound(a);
+            if (!bound_finder_t::is_good_bound(hi)) return false;
+            return hi <= b;
+        }
+
+        return false;
+    }
+
     bool can_prove_impl(const expr_t &_e, bool do_simplify) const;
 
     object_map_t<expr_t, std::vector<relation_t>> relations_;
     object_map_t<expr_t, std::vector<modulus_info_t>> modulus_infos_;
 };
+
+// Determine the maximum constant factor of an expression, returns 0 in the
+// special case that the expression evaluates to 0.
+int64_t get_max_const_factor(const expr_t &e, const constraint_set_t &cset);
+
+// Simplifies expression using rewriting rules.
+expr_t simplify_rewrite(const expr_t &e);
 
 // Simplifies expression or statement. An optional constraint set is used to
 // pass known equalities and inequalities which may be used for simplification.
@@ -989,6 +908,15 @@ inline func_t barrier_wait_func() {
 
 inline stmt_t barrier_wait() {
     return barrier_wait_func().call();
+}
+
+inline func_t continue_func() {
+    static auto f = builtin_t::make("continue");
+    return f;
+}
+
+inline stmt_t _continue() {
+    return continue_func().call();
 }
 
 } // namespace funcs

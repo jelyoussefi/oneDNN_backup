@@ -71,11 +71,16 @@ struct jit_bnorm_base_t : public jit_generator {
     Reg64 reg_var = r14;
     Reg64 reg_channel_offt_1byte = r15;
     Reg64 reg_channel_offt_4byte = rax;
+    Reg64 reg_relu_alpha = abi_not_param1;
+
+    Opmask kstore_mask = Opmask(1);
 
     Vmm vzero = Vmm(isa == avx512_core ? 29 : 13);
     Xmm xone = Xmm(14);
     Vmm vone = Vmm(isa == avx512_core ? 30 : 14);
     Vmm veps = Vmm(isa == avx512_core ? 31 : 15);
+    Vmm vmm_aux = Vmm(isa == avx512_core ? 28 : 10); // shared with 'veps'
+    Vmm vmm_mask = Vmm(0); // used for AVX2 and SSE41
 
     size_t simd_w_ = cpu_isa_traits<isa>::vlen / sizeof(float);
     size_t c_in_xmm_ = (isa == sse41) ? 8 : 16;
@@ -83,13 +88,16 @@ struct jit_bnorm_base_t : public jit_generator {
     size_t num_c_blocks_;
     size_t c_tail_;
     bool with_relu_;
+    bool has_alpha_value_;
 
     void compute_predefined_variables() {
         chan_data_offt_ = pd_->C() * sizeof(float);
         num_c_blocks_ = pd_->C() / c_in_xmm_;
         c_tail_ = pd_->C() % c_in_xmm_;
-        with_relu_ = (pd_->with_relu_post_op() || pd_->fuse_norm_relu())
+        with_relu_ = (pd_->with_relu_post_op(false) || pd_->fuse_norm_relu())
                 && pd_->is_fwd();
+        has_alpha_value_ = with_relu_ && pd_->with_relu_post_op(false)
+                && pd_->alpha() != 0;
     }
 
     void load_common_params() {
@@ -111,6 +119,8 @@ struct jit_bnorm_base_t : public jit_generator {
         mov(reg_shift, ptr[reg_param + PARAM_OFF(shift)]);
         mov(reg_var, ptr[reg_param + PARAM_OFF(var)]);
 #undef PARAM_OFF
+
+        if (has_alpha_value_) { mov(reg_relu_alpha, float2int(pd_->alpha())); }
     }
 
     Address mean_ptr(size_t offt = 0) {
@@ -244,6 +254,15 @@ struct jit_bnorm_s8_t<avx512_core> : public jit_bnorm_base_t<avx512_core> {
         }
     }
 
+    void process_relu_alpha(Vmm vmm_dst) {
+        const Xmm xmm_aux = Xmm(vmm_aux.getIdx());
+        vmovq(xmm_aux, reg_relu_alpha);
+        vbroadcastss(vmm_aux, xmm_aux);
+        vcmpps(kstore_mask, vzero, vmm_dst, _cmp_lt_os);
+        vmulps(vmm_aux, vmm_dst, vmm_aux);
+        vblendmps(vmm_dst | kstore_mask, vmm_aux, vmm_dst);
+    }
+
     void compute_dst(bool need_tail) override {
         Label c_loop;
         L(c_loop);
@@ -274,7 +293,12 @@ struct jit_bnorm_s8_t<avx512_core> : public jit_bnorm_base_t<avx512_core> {
                 vcvtdq2ps(v, v);
 
                 uni_vfmadd213ps(v, vscale, vshift);
-                if (with_relu_) uni_vmaxps(v, v, vzero);
+                if (with_relu_) {
+                    if (has_alpha_value_)
+                        process_relu_alpha(v);
+                    else
+                        uni_vmaxps(v, v, vzero);
+                }
 
                 vcvtps2dq(v, v);
                 if (need_tail) {
@@ -352,6 +376,17 @@ struct jit_bnorm_s8_t<avx2> : public jit_bnorm_base_t<avx2> {
         }
     }
 
+    void process_relu_alpha(Vmm vmm_dst) {
+        const Xmm xmm_aux = Xmm(vmm_aux.getIdx());
+        uni_vpxor(vmm_mask, vmm_mask, vmm_mask);
+        vmovq(xmm_aux, reg_relu_alpha);
+        uni_vbroadcastss(vmm_aux, xmm_aux);
+        uni_vcmpps(vmm_mask, vmm_dst, vzero, _cmp_lt_os);
+        uni_vmulps(vmm_aux, vmm_aux, vmm_dst);
+        uni_vblendvps(
+                vmm_dst, vmm_dst, vmm_aux, vmm_mask); // swaped aux and dst
+    }
+
     void compute_dst(bool need_tail) override {
         Label c_loop;
         L(c_loop);
@@ -406,8 +441,21 @@ struct jit_bnorm_s8_t<avx2> : public jit_bnorm_base_t<avx2> {
                 uni_vfmadd213ps(v0, vscale0, vshift0);
                 uni_vfmadd213ps(v1, vscale1, vshift1);
                 if (with_relu_) {
-                    uni_vmaxps(v0, v0, vzero);
-                    uni_vmaxps(v1, v1, vzero);
+                    if (has_alpha_value_) {
+                        Vmm vmm_dst_0 = Vmm(5);
+                        Vmm vmm_dst_1 = Vmm(9);
+                        uni_vmovups(vmm_dst_0, v0);
+                        uni_vmovups(vmm_dst_1, v1);
+
+                        process_relu_alpha(vmm_dst_0);
+                        process_relu_alpha(vmm_dst_1);
+
+                        uni_vmovups(v0, vmm_dst_0);
+                        uni_vmovups(v1, vmm_dst_1);
+                    } else {
+                        uni_vmaxps(v0, v0, vzero);
+                        uni_vmaxps(v1, v1, vzero);
+                    }
                 }
 
                 vcvtps2dq(v0, v0); // BA
@@ -480,6 +528,17 @@ struct jit_bnorm_s8_t<sse41> : public jit_bnorm_base_t<sse41> {
         }
     }
 
+    void process_relu_alpha(Vmm vmm_dst) {
+        const Xmm xmm_aux = Xmm(vmm_aux.getIdx());
+        uni_vpxor(vmm_mask, vmm_mask, vmm_mask);
+        vmovq(xmm_aux, reg_relu_alpha);
+        uni_vbroadcastss(vmm_aux, xmm_aux);
+        uni_vcmpps(vmm_mask, vmm_dst, vzero, _cmp_lt_os);
+        uni_vmulps(vmm_aux, vmm_aux, vmm_dst);
+        uni_vblendvps(
+                vmm_dst, vmm_dst, vmm_aux, vmm_mask); // swaped aux and dst
+    }
+
     void compute_dst(bool need_tail) override {
         const size_t copy_range = need_tail ? c_tail_ : c_in_xmm_;
         Label c_loop;
@@ -532,8 +591,21 @@ struct jit_bnorm_s8_t<sse41> : public jit_bnorm_base_t<sse41> {
                 uni_vfmadd213ps(v0, vscale0, vshift0);
                 uni_vfmadd213ps(v1, vscale1, vshift1);
                 if (with_relu_) {
-                    maxps(v0, vzero);
-                    maxps(v1, vzero);
+                    if (has_alpha_value_) {
+                        Vmm vmm_dst_0 = Vmm(5);
+                        Vmm vmm_dst_1 = Vmm(9);
+                        movups(vmm_dst_0, v0);
+                        movups(vmm_dst_1, v1);
+
+                        process_relu_alpha(vmm_dst_0);
+                        process_relu_alpha(vmm_dst_1);
+
+                        movups(v0, vmm_dst_0);
+                        movups(v1, vmm_dst_1);
+                    } else {
+                        maxps(v0, vzero);
+                        maxps(v1, vzero);
+                    }
                 }
 
                 cvtps2dq(v0, v0);
@@ -631,7 +703,7 @@ status_t jit_uni_batch_normalization_s8_fwd_t<isa>::pd_t::init(
             && one_of(ndims(), 4, 5) && stats_is_src()
             && src_md()->data_type == s8 && check_scale_shift_data_type()
             && memory_desc_matches_tag(*src_md(), desired_fmt_tag)
-            && (attr()->has_default_values() || this->with_relu_post_op());
+            && (attr()->has_default_values() || this->with_relu_post_op(false));
     if (!ok) return status::unimplemented;
 
     return status::success;

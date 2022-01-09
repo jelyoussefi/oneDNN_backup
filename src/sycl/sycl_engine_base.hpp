@@ -29,6 +29,7 @@
 #include "gpu/ocl/ocl_engine.hpp"
 #include "gpu/ocl/ocl_gpu_engine.hpp"
 #include "gpu/ocl/ocl_utils.hpp"
+#include "sycl/sycl_compat.hpp"
 #include "sycl/sycl_interop_gpu_kernel.hpp"
 #include "sycl/sycl_utils.hpp"
 
@@ -44,8 +45,8 @@ namespace sycl {
 
 class sycl_engine_base_t : public gpu::compute::compute_engine_t {
 public:
-    sycl_engine_base_t(engine_kind_t kind, const cl::sycl::device &dev,
-            const cl::sycl::context &ctx, size_t index)
+    sycl_engine_base_t(engine_kind_t kind, const ::sycl::device &dev,
+            const ::sycl::context &ctx, size_t index)
         : gpu::compute::compute_engine_t(kind, runtime_kind::sycl, index)
         , device_(dev)
         , context_(ctx)
@@ -66,10 +67,13 @@ public:
             size_t size, void *handle) override;
 
     status_t create_stream(stream_t **stream, unsigned flags) override;
-    status_t create_stream(stream_t **stream, cl::sycl::queue &queue);
+    status_t create_stream(stream_t **stream, ::sycl::queue &queue);
 
     status_t create_kernel(gpu::compute::kernel_t *kernel,
-            gpu::jit::jit_generator_base &jitter) const override {
+            gpu::jit::jit_generator_base *jitter,
+            cache_blob_t cache_blob) const override {
+
+        UNUSED(cache_blob);
         if (kind() != engine_kind::gpu) {
             assert(!"not expected");
             return status::invalid_arguments;
@@ -80,9 +84,9 @@ public:
         auto status = create_ocl_engine(&ocl_engine);
         if (status != status::success) return status;
 
-        auto kernel_name = jitter.kernel_name();
+        auto kernel_name = jitter->kernel_name();
 
-        gpu::ocl::ocl_wrapper_t<cl_kernel> ocl_kernel = jitter.get_kernel(
+        gpu::ocl::ocl_wrapper_t<cl_kernel> ocl_kernel = jitter->get_kernel(
                 ocl_engine->context(), ocl_engine->device());
 
         gpu::ocl::dump_kernel_binary(ocl_kernel.get());
@@ -101,7 +105,9 @@ public:
 
     status_t create_kernels(std::vector<gpu::compute::kernel_t> *kernels,
             const std::vector<const char *> &kernel_names,
-            const gpu::compute::kernel_ctx_t &kernel_ctx) const override {
+            const gpu::compute::kernel_ctx_t &kernel_ctx,
+            cache_blob_t cache_blob) const override {
+        UNUSED(cache_blob);
         if (kind() != engine_kind::gpu) {
             assert(!"not expected");
             return status::invalid_arguments;
@@ -114,7 +120,7 @@ public:
 
         std::vector<gpu::compute::kernel_t> ocl_kernels;
         CHECK(ocl_engine->create_kernels(
-                &ocl_kernels, kernel_names, kernel_ctx));
+                &ocl_kernels, kernel_names, kernel_ctx, cache_blob));
         *kernels = std::vector<gpu::compute::kernel_t>(kernel_names.size());
         for (size_t i = 0; i < ocl_kernels.size(); ++i) {
             if (!ocl_kernels[i]) continue;
@@ -127,8 +133,8 @@ public:
         return status::success;
     }
 
-    const cl::sycl::device &device() const { return device_; }
-    const cl::sycl::context &context() const { return context_; }
+    const ::sycl::device &device() const { return device_; }
+    const ::sycl::context &context() const { return context_; }
 
     backend_t backend() const { return backend_; }
 
@@ -138,7 +144,8 @@ public:
             return nullptr;
         }
         assert(device_.is_cpu() || device_.is_gpu());
-        return gpu::ocl::make_ocl_wrapper(device().get());
+        return gpu::ocl::make_ocl_wrapper(
+                compat::get_native<cl_device_id>(device()));
     }
     cl_context ocl_context() const {
         if (backend() != backend_t::opencl) {
@@ -146,7 +153,8 @@ public:
             return nullptr;
         }
         assert(device_.is_cpu() || device_.is_gpu());
-        return gpu::ocl::make_ocl_wrapper(context().get());
+        return gpu::ocl::make_ocl_wrapper(
+                compat::get_native<cl_context>(context()));
     }
 
     device_id_t device_id() const override { return sycl_device_id(device_); }
@@ -167,8 +175,8 @@ protected:
     status_t init_device_info() override;
 
 private:
-    cl::sycl::device device_;
-    cl::sycl::context context_;
+    ::sycl::device device_;
+    ::sycl::context context_;
 
     backend_t backend_;
 

@@ -27,8 +27,7 @@ namespace dnnl {
 namespace impl {
 namespace gpu {
 namespace nvidia {
-bool compare_cuda_devices(
-        const cl::sycl::device &lhs, const cl::sycl::device &rhs);
+bool compare_cuda_devices(const ::sycl::device &lhs, const ::sycl::device &rhs);
 }
 } // namespace gpu
 } // namespace impl
@@ -44,10 +43,10 @@ backend_t get_sycl_gpu_backend() {
     static backend_t default_backend = []() {
         const backend_t fallback = backend_t::opencl;
 
-        const auto gpu_type = cl::sycl::info::device_type::gpu;
-        if (cl::sycl::device::get_devices(gpu_type).empty()) return fallback;
+        const auto gpu_type = ::sycl::info::device_type::gpu;
+        if (::sycl::device::get_devices(gpu_type).empty()) return fallback;
 
-        cl::sycl::device dev {cl::sycl::gpu_selector {}};
+        ::sycl::device dev {::sycl::gpu_selector {}};
         backend_t backend = get_sycl_backend(dev);
 
 #if !defined(DNNL_WITH_LEVEL_ZERO)
@@ -60,7 +59,7 @@ backend_t get_sycl_gpu_backend() {
     return default_backend;
 }
 
-bool are_equal(const cl::sycl::device &lhs, const cl::sycl::device &rhs) {
+bool are_equal(const ::sycl::device &lhs, const ::sycl::device &rhs) {
     auto lhs_be = get_sycl_backend(lhs);
     auto rhs_be = get_sycl_backend(rhs);
     if (lhs_be != rhs_be) return false;
@@ -70,9 +69,9 @@ bool are_equal(const cl::sycl::device &lhs, const cl::sycl::device &rhs) {
 
     if (lhs_be == backend_t::opencl) {
         // Use wrapper objects to avoid memory leak.
-        auto lhs_ocl_dev = gpu::ocl::make_ocl_wrapper(lhs.get());
-        auto rhs_ocl_dev = gpu::ocl::make_ocl_wrapper(rhs.get());
-        return lhs_ocl_dev == rhs_ocl_dev;
+        auto lhs_ocl_handle = compat::get_native<cl_device_id>(lhs);
+        auto rhs_ocl_handle = compat::get_native<cl_device_id>(rhs);
+        return lhs_ocl_handle == rhs_ocl_handle;
     }
 
     if (lhs_be == backend_t::level0) { return compare_ze_devices(lhs, rhs); }
@@ -87,7 +86,7 @@ bool are_equal(const cl::sycl::device &lhs, const cl::sycl::device &rhs) {
     return false;
 }
 
-device_id_t sycl_device_id(const cl::sycl::device &dev) {
+device_id_t sycl_device_id(const ::sycl::device &dev) {
     if (dev.is_host())
         return std::make_tuple(static_cast<int>(backend_t::host), 0, 0);
 
@@ -95,7 +94,8 @@ device_id_t sycl_device_id(const cl::sycl::device &dev) {
             = device_id_t {static_cast<int>(backend_t::unknown), 0, 0};
     switch (get_sycl_backend(dev)) {
         case backend_t::opencl: {
-            auto ocl_device = gpu::ocl::make_ocl_wrapper(dev.get());
+            auto ocl_device = gpu::ocl::make_ocl_wrapper(
+                    compat::get_native<cl_device_id>(dev));
             device_id = std::make_tuple(static_cast<int>(backend_t::opencl),
                     reinterpret_cast<uint64_t>(ocl_device.get()), 0);
             break;

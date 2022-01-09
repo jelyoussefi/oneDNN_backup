@@ -22,6 +22,8 @@
 #include "oneapi/dnnl/dnnl.h"
 
 #include "c_types_map.hpp"
+#include "cache_blob.hpp"
+#include "cache_blob_id.hpp"
 #include "memory_tracking.hpp"
 #include "nstl.hpp"
 #include "primitive_attr.hpp"
@@ -64,6 +66,10 @@ struct primitive_desc_t : public c_compatible {
     }
 
     virtual const op_desc_t *op_desc() const { return nullptr; }
+
+    const std::vector<uint8_t> &get_cache_blob_id(engine_t *engine) const {
+        return cache_blob_id_.get(engine, this);
+    }
 
     static bool post_op_has_proper_input(const primitive_attr_t *attr,
             const primitive_kind_t prim, const int idx, const int arg,
@@ -241,15 +247,16 @@ struct primitive_desc_t : public c_compatible {
 
     virtual status_t create_primitive(
             std::pair<std::shared_ptr<primitive_t>, bool> &primitive,
-            engine_t *engine) const = 0;
+            engine_t *engine, const cache_blob_t &cache_blob) const = 0;
 
     // This is a proxy interface that is used for creating nested primitives.
     // It ignores the bool value that indicates whether the requested primitive
     // was taken from cache.
-    status_t create_primitive(
-            std::shared_ptr<primitive_t> &primitive, engine_t *engine) const {
+    status_t create_primitive(std::shared_ptr<primitive_t> &primitive,
+            engine_t *engine,
+            const cache_blob_t &cache_blob = cache_blob_t()) const {
         std::pair<std::shared_ptr<primitive_t>, bool> p;
-        CHECK(create_primitive(p, engine));
+        CHECK(create_primitive(p, engine, cache_blob));
         primitive = p.first;
         return status::success;
     }
@@ -266,6 +273,7 @@ protected:
     memory_desc_t scratchpad_md_;
 
     mutable pd_info_t info_;
+    mutable cache_blob_id_t cache_blob_id_;
 
     memory_tracking::registry_t scratchpad_registry_;
 
@@ -350,7 +358,8 @@ struct dnnl_primitive_desc : public dnnl::impl::c_compatible {
             dnnl::impl::query_t what, int idx, void *result) const;
 
     virtual dnnl::impl::status_t create_primitive_iface(
-            std::pair<primitive_iface_t *, bool> &primitive_iface) const;
+            std::pair<primitive_iface_t *, bool> &primitive_iface,
+            const dnnl::impl::cache_blob_t &cache_blob) const;
 
     const std::shared_ptr<dnnl::impl::primitive_desc_t> &impl() const;
 
@@ -367,9 +376,9 @@ protected:
     } \
     status_t create_primitive( \
             std::pair<std::shared_ptr<primitive_t>, bool> &primitive, \
-            engine_t *engine) const override { \
+            engine_t *engine, const cache_blob_t &cache_blob) const override { \
         return primitive_t::create_primitive_common<impl_type, pd_t>( \
-                primitive, this, engine, use_global_scratchpad); \
+                primitive, this, engine, use_global_scratchpad, cache_blob); \
     } \
     const char *name() const override { return impl_name; } \
     template <typename pd_t> \

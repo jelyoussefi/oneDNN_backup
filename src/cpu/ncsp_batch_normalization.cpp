@@ -80,21 +80,24 @@ status_t ncsp_batch_normalization_fwd_t<d_type>::execute_forward(
             = scratchpad.template get<acc_data_t>(key_bnorm_bf16cvt);
 
     const float eps = pd()->desc()->batch_norm_epsilon;
-    const bool with_relu = pd()->with_relu_post_op();
-    auto maybe_post_op
-            = [&](acc_data_t res) { return (with_relu && res < 0) ? 0 : res; };
+    const bool with_relu = pd()->with_relu_post_op(is_training);
+    auto maybe_post_op = [&](acc_data_t res) {
+        if (with_relu) return math::relu_fwd(res, pd()->alpha());
+        return res;
+    };
+
     const bool has_spatial = utils::one_of(pd()->ndims(), 4, 5);
     const dim_t SP = (has_spatial) ? pd()->H() * pd()->W() * pd()->D() : 1;
     const dim_t simd_w = 16;
     const dim_t SP_cl_align = utils::rnd_up(SP, simd_w);
     const dim_t N = pd()->MB();
 
-    int nthr = dnnl_get_max_threads();
+    const int nthr = pd()->nthr_;
     size_t l3_size_ = platform::get_per_core_cache_size(3) * nthr / 2;
     size_t data_size = N * C * SP * sizeof(data_t);
     bool do_blocking = (data_size >= l3_size_ / 2 && l3_size_ > 0);
 
-    parallel(0, [&](const int ithr, const int nthr) {
+    parallel(nthr, [&](const int ithr, const int nthr) {
         int C_ithr = 0, C_nthr = 0;
         int N_ithr = 0, N_nthr = 0;
         int S_ithr = 0, S_nthr = 0;
@@ -347,12 +350,12 @@ status_t ncsp_batch_normalization_bwd_t<d_type>::execute_backward(
     const bool calculate_diff_stats = !pd()->use_global_stats();
     const bool fuse_norm_relu = pd()->fuse_norm_relu();
 
-    int nthr = dnnl_get_max_threads();
+    const int nthr = pd()->nthr_;
     size_t l3_size_ = platform::get_per_core_cache_size(3) * nthr / 2;
     size_t data_size = N * C * SP * sizeof(data_t);
     bool do_blocking = (data_size >= l3_size_ / 2 && l3_size_ > 0);
 
-    parallel(0, [&](const int ithr, const int nthr) {
+    parallel(nthr, [&](const int ithr, const int nthr) {
         int C_ithr = 0, C_nthr = 0;
         int N_ithr = 0, N_nthr = 0;
         int S_ithr = 0, S_nthr = 0;

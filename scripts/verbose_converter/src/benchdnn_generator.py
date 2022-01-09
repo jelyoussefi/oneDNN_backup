@@ -479,7 +479,8 @@ def convert_post_ops(post_ops):
     def convert_prelu_post_op(post_op):
         benchdnn_p_op = post_op['alg']
         if post_op['mask'] != 0:
-            benchdnn_p_op += ':' + post_op['mask']
+            policy = convert_scale_policy(post_op['mask'])
+            benchdnn_p_op += ':' + policy
         return benchdnn_p_op
 
     convert = {
@@ -504,7 +505,15 @@ def convert_post_ops(post_ops):
 
 def convert_oscale(oscale):
     benchdnn_oscale = convert_scale_policy(oscale['mask'])
+    not_default_value = '0.5'
     value = oscale['value']
+    if value != None:
+        if value == '*':
+            value = not_default_value + '*'
+    else:
+        if benchdnn_oscale != 'common':
+            value = not_default_value
+
     if value != None:
         benchdnn_oscale += ':' + value
     return benchdnn_oscale
@@ -512,6 +521,7 @@ def convert_oscale(oscale):
 
 def convert_scales(scales):
     res = []
+    not_default_value = '0.5'
     for arg in scales.keys():
         s = scales[arg]
         policy = convert_scale_policy(s['mask'])
@@ -519,10 +529,10 @@ def convert_scales(scales):
         value = s['value']
         # benchdnn requires user to pass a value
         if value == None:
-            value = '0.5'
+            value = not_default_value
         # benchdnn doesn't allow user to pass * without an actual value
         if value == '*':
-            value = '0.5'
+            value = not_default_value + '*'
         benchdnn_scale += ':' + value
         res.append(benchdnn_scale)
     return '+'.join(res)
@@ -530,17 +540,20 @@ def convert_scales(scales):
 
 def convert_zero_points(zero_points):
     res = []
+    not_default_value = '1'
     for arg in zero_points.keys():
         zp = zero_points[arg]
         policy = convert_zp_policy(zp['mask'])
         benchdnn_zp = arg + ':' + policy
         value = zp['value']
+        if policy != 'common':
+            value = '*'
         # benchdnn requires user to pass a value
         if value == None:
-            value = '1'
+            value = not_default_value
         # benchdnn doesn't allow user to pass * without an actual value
         if value == '*':
-            value = '1'
+            value = not_default_value + '*'
         benchdnn_zp += ':' + value
         res.append(benchdnn_zp)
     return '+'.join(res)

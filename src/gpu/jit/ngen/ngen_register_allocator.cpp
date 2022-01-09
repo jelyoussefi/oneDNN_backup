@@ -35,6 +35,7 @@ int Bundle::first_reg(HW hw) const
     case HW::Gen11:
         return (bundle0 << 8) | (bank0 << 1);
     case HW::Gen12LP:
+    case HW::XeHPC:
         return (bundle0 << 1) | bank0;
     case HW::XeHP:
     case HW::XeHPG:
@@ -73,6 +74,8 @@ int Bundle::stride(HW hw) const
     case HW::XeHP:
     case HW::XeHPG:
         return 64;
+    case HW::XeHPC:
+        return 32;
     default:
         return 128;
     }
@@ -103,6 +106,10 @@ int64_t Bundle::reg_mask(HW hw, int offset) const
         if (bundle_id != any)                           base_mask  = 0x000000000000000F;
         if (bank_id != any)                             base_mask &= 0x3333333333333333;
         return base_mask << ((bank0 << 1) + (bundle0 << 2));
+    case HW::XeHPC:
+        if (bundle_id != any)                           base_mask  = 0x0000000300000003;
+        if (bank_id != any)                             base_mask &= 0x5555555555555555;
+        return base_mask << (bank0 + (bundle0 << 1));
     default:
         return -1;
     }
@@ -123,6 +130,8 @@ Bundle Bundle::locate(HW hw, RegData reg)
         case HW::XeHP:
         case HW::XeHPG:
             return Bundle((base >> 1) & 1, (base >> 2) & 0xF);
+        case HW::XeHPC:
+            return Bundle(base & 1, (base >> 1) & 0xF);
         default:
             return Bundle();
     }
@@ -195,6 +204,20 @@ void RegisterAllocator::setRegisterCount(int rcount)
             release(GRF(r));
     }
     reg_count = rcount;
+}
+
+int RegisterAllocator::countAllocedRegisters() const {
+
+   int register_count = 0;
+   int group_size = 8 * sizeof(this->free_whole[0]);
+   int register_groups = this->reg_count / group_size;
+   for (int group = 0; group < register_groups; group++) {
+       for (int subgroup = 0; subgroup < group_size; subgroup++) {
+           if ((this->free_whole[group] & (1 << subgroup)) == 0)
+               register_count++;
+       }
+   }
+   return register_count;
 }
 
 void RegisterAllocator::release(GRF reg)
@@ -312,14 +335,20 @@ GRFRange RegisterAllocator::try_alloc_range(int nregs, Bundle base_bundle, Bundl
     return GRFRange();
 }
 
+GRF RegisterAllocator::try_alloc(Bundle bundle)
+{
+    auto range = try_alloc_range(1, bundle);
+    return range.isInvalid() ? GRF() : range[0];
+}
+
 Subregister RegisterAllocator::try_alloc_sub(DataType type, Bundle bundle)
 {
     int dwords = getDwords(type);
     int r_alloc, o_alloc;
 
     auto find_alloc_sub = [&,bundle,dwords](bool search_full_grf) -> bool {
-        static const uint8_t alloc_patterns[4] = {0b11111111, 0b01010101, 0, 0b00010001};
-        uint8_t alloc_pattern = alloc_patterns[(dwords - 1) & 3];
+        static const uint16_t alloc_patterns[4] = {0b1111111111111111, 0b0101010101010101, 0, 0b0001000100010001};
+        auto alloc_pattern = alloc_patterns[(dwords - 1) & 3];
         int64_t *free_whole64 = (int64_t *) free_whole;
 
         for (int rchunk = 0; rchunk < (max_regs >> 6); rchunk++) {
@@ -401,7 +430,7 @@ void RegisterAllocator::dump(std::ostream &str)
             str << "// Inconsistent bitmaps at r" << r << std::endl;
         if (free_sub[r] != 0x00 && free_sub[r] != fullSubMask) {
             str << "//  r" << std::setw(3) << r << "   ";
-            for (int s = 0; s < 8; s++)
+            for (int s = 0; s < (GRF::bytes(hw) >> 2); s++)
                 str << char((free_sub[r] & (1 << s)) ? '.' : 'x');
             str << std::endl;
         }

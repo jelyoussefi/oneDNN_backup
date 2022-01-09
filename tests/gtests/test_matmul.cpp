@@ -295,6 +295,7 @@ protected:
         ASSERT_TRUE(matmul_pd.query_md(query::exec_arg_md, DNNL_ARG_DST)
                 == matmul_pd.dst_desc());
 
+        EXPECT_ANY_THROW(matmul(matmul_pd, {}));
         auto matmul_p = matmul(matmul_pd);
 
         auto src_m = test::make_memory(init_md(p.base.src, true), eng);
@@ -447,6 +448,12 @@ static auto cases_ef = []() {
             {P::NONE, {P::ZERO_POINTS | P::SRC | P::COMMON}}, true,
             dnnl_unimplemented});
 
+    // bf16 data and zero-points
+    cases.push_back({{{{10, 1}, data_type::bf16, tag::ab},
+                             {{1, 20}, data_type::bf16, tag::ab},
+                             {{10, 20}, data_type::bf16, tag::ab}},
+            {P::NONE, {P::ZERO_POINTS | P::SRC | P::COMMON}}, true,
+            dnnl_unimplemented});
     // unimplemented data types
     if (get_test_engine_kind() == engine::kind::cpu) {
         cases.push_back(

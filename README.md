@@ -93,7 +93,7 @@ integration. Compute Library is an open-source library for machine learning appl
 and provides AArch64 optimized implementations of core functions. This functionality currently
 requires that Compute Library is downloaded and built separately, see
 [Build from Source](https://oneapi-src.github.io/oneDNN/dev_guide_build.html). oneDNN is only
-compatible with Compute Library versions 21.08 or later.
+compatible with Compute Library versions 21.11 or later.
 
 > **WARNING**
 >
@@ -164,7 +164,6 @@ is enabled:
     * [oneAPI Level Zero](https://github.com/oneapi-src/level-zero)
 * DPCPP runtime with NVIDIA GPU support requires
     * [oneAPI DPC++ Compiler](https://github.com/intel/llvm)
-    * OpenCL runtime library (OpenCL version 1.2 or later)
     * NVIDIA CUDA\* driver
     * cuBLAS 10.1 or later
     * cuDNN 7.6 or later
@@ -291,11 +290,6 @@ Please submit your questions, feature requests, and bug reports on the
 
 You may reach out to project maintainers privately
 at dnnl.maintainers@intel.com.
-
-> **WARNING**
->
-> This is pre-production software and functionality may change without prior
-> notice.
 
 # Contributing
 

@@ -26,10 +26,9 @@ namespace gpu {
 namespace jit {
 
 layout_t::layout_t(const type_t &type, const expr_t &offset,
-        const std::string &format, const std::vector<dim_t> &dims,
-        bool do_normalize)
+        const std::vector<std::pair<int, dim_t>> &parts,
+        const std::vector<dim_t> &dims, bool do_normalize)
     : type_(type), offset_(offset) {
-    auto parts = parse_format(format, int(dims.size()));
     ndims_ = 0;
     for (auto &p : parts) {
         int dim_idx = p.first;
@@ -129,7 +128,7 @@ memory_desc_t layout_t::to_dnnl(const dim_t *dims_hint) const {
             blk.inner_nblks++;
             if (prev_stride > 0) {
                 // Inner block must be dense.
-                ir_assert(prev_stride == b.block * b.stride);
+                ir_assert(prev_stride == b.block * dim_t(b.stride));
             }
             prev_stride = b.stride;
             in_inner_block = true;
@@ -208,9 +207,14 @@ layout_t layout_t::reinterpret(
         return layout_t();
     }
 
+    auto &b0 = new_blocks.front();
+    if (dim_t(b0.stride) != 1) {
+        ir_error_not_expected();
+        return layout_t();
+    }
+
     if (new_size < old_size) {
         int factor = (old_size / new_size);
-        auto &b0 = new_blocks.front();
         b0.block *= factor;
         // Recompute strides.
         for (auto &b : new_blocks) {
@@ -219,7 +223,6 @@ layout_t layout_t::reinterpret(
         }
     } else {
         int factor = (new_size / old_size);
-        auto &b0 = new_blocks.front();
         if (b0.block % factor != 0) {
             ir_error_not_expected();
             return layout_t();
@@ -623,7 +626,7 @@ layout_t dim_assignment_t::map(const layout_t &layout) const {
         new_blocks.push_back(new_b);
     }
     new_blocks = layout_t::normalize_blocks(new_ndims(), new_blocks,
-            /*keep_size_1_blocks=*/true);
+            /*remove_size_1_blocks=*/false);
     auto ret = layout_t(layout.type(), new_ndims(), layout.offset(), new_blocks,
             /*do_normalize=*/false);
     ir_assert(layout.elems() == ret.elems())
@@ -634,7 +637,7 @@ layout_t dim_assignment_t::map(const layout_t &layout) const {
 // Adds size one spatial dimensions according to input parameters. Spatial
 // dimensions are assumed to be the last dimensions.
 layout_t normalize_conv_spatial(
-        const layout_t &layout, int old_sp_ndims, bool reduced_to_1d) {
+        const layout_t &layout, int old_sp_ndims, int reduced_dim) {
     int old_ndims = layout.ndims();
     int new_ndims = old_ndims - old_sp_ndims + 3;
 
@@ -646,7 +649,11 @@ layout_t normalize_conv_spatial(
         } else {
             // Spatial dimensions.
             int sp_idx = 3 - (old_ndims - i);
-            if (reduced_to_1d) sp_idx = 2;
+            if (reduced_dim == 3) {
+                sp_idx = 2;
+            } else if (sp_idx < reduced_dim) {
+                sp_idx += 1;
+            }
             to_3d.assign(i, new_ndims - (3 - sp_idx));
         }
     }
@@ -726,12 +733,11 @@ layout_t normalize_conv_groups(const layout_t &layout, bool with_groups,
 }
 
 layout_t normalize_conv_layout(const layout_t &_layout, bool with_groups,
-        int groups, bool is_dw, bool reduced_to_1d, bool add_groups,
-        bool is_wei) {
+        int groups, bool is_dw, int reduced_dim, bool add_groups, bool is_wei) {
     int old_sp_ndims = _layout.ndims() - (with_groups ? 3 : 2);
 
     layout_t layout = _layout;
-    layout = normalize_conv_spatial(layout, old_sp_ndims, reduced_to_1d);
+    layout = normalize_conv_spatial(layout, old_sp_ndims, reduced_dim);
     layout = normalize_conv_groups(
             layout, with_groups, groups, is_dw, add_groups, is_wei);
 
@@ -739,23 +745,23 @@ layout_t normalize_conv_layout(const layout_t &_layout, bool with_groups,
 }
 
 std::vector<dim_t> normalize_conv_dims(std::vector<dim_t> &dims,
-        bool with_groups, int groups, bool is_dw, bool reduced_to_1d,
+        bool with_groups, int groups, bool is_dw, int reduced_dim,
         bool add_groups, bool is_wei) {
     layout_t dummy_layout(type_t::u8(), 0, dims);
     return normalize_conv_layout(dummy_layout, with_groups, groups, is_dw,
-            reduced_to_1d, add_groups, is_wei)
+            reduced_dim, add_groups, is_wei)
             .dims();
 }
 
 void normalize_conv_layouts(layout_t &src_layout, layout_t &wei_layout,
         layout_t &dst_layout, bool with_groups, int groups, bool is_dw,
-        bool reduced_to_1d, bool add_groups) {
+        int reduced_dim, bool add_groups) {
     src_layout = normalize_conv_layout(src_layout, /*with_groups=*/false,
-            groups, is_dw, reduced_to_1d, add_groups, /*is_wei=*/false);
+            groups, is_dw, reduced_dim, add_groups, /*is_wei=*/false);
     wei_layout = normalize_conv_layout(wei_layout, with_groups, groups, is_dw,
-            reduced_to_1d, add_groups, /*is_wei=*/true);
+            reduced_dim, add_groups, /*is_wei=*/true);
     dst_layout = normalize_conv_layout(dst_layout, /*with_groups=*/false,
-            groups, is_dw, reduced_to_1d, add_groups, /*is_wei=*/false);
+            groups, is_dw, reduced_dim, add_groups, /*is_wei=*/false);
 }
 
 } // namespace jit

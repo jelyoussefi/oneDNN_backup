@@ -39,8 +39,8 @@ void check_correctness(const settings_t &s) {
         attr_t attr;
         attr.insert(i_scratchpad_mode);
 
-        const prb_t prb(s.dims, i_dir, i_dt, i_tag, i_alg, i_axis, i_inplace,
-                attr, i_mb);
+        const prb_t prb(s.prb_dims, i_dir, i_dt, i_tag, i_alg, i_axis,
+                i_inplace, attr, i_mb);
         std::stringstream ss;
         ss << prb;
         const std::string cpp_pstr = ss.str();
@@ -81,11 +81,11 @@ int bench(int argc, char **argv) {
                         s.scratchpad_mode, def.scratchpad_mode, argv[0])
                 || parse_perf_template(s.perf_template, s.perf_template_def,
                         s.perf_template_csv, argv[0])
-                || parse_reset(s, argv[0]);
+                || parse_reset(s, argv[0]) || parse_help(argv[0]);
         if (!parsed_options) {
             catch_unknown_options(argv[0]);
 
-            parse_dims(s.dims, argv[0]);
+            parse_prb_dims(s.prb_dims, argv[0]);
             check_correctness(s);
         }
     }

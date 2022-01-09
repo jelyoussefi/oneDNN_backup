@@ -54,11 +54,13 @@ public:
     status_t create_stream(stream_t **stream, cl_command_queue queue);
 
     status_t create_kernel(compute::kernel_t *kernel,
-            jit::jit_generator_base &jitter) const override;
+            jit::jit_generator_base *jitter,
+            cache_blob_t cache_blob) const override;
 
     status_t create_kernels(std::vector<compute::kernel_t> *kernels,
             const std::vector<const char *> &kernel_names,
-            const compute::kernel_ctx_t &kernel_ctx) const override;
+            const compute::kernel_ctx_t &kernel_ctx,
+            cache_blob_t cache_blob) const override;
 
     status_t create_kernels_from_ocl_source(
             std::vector<compute::kernel_t> *kernels,
@@ -84,8 +86,7 @@ public:
 
     const impl_list_item_t *get_implementation_list(
             const op_desc_t *desc) const override {
-        UNUSED(desc);
-        return gpu_impl_list_t::get_implementation_list();
+        return gpu_impl_list_t::get_implementation_list(desc);
     }
 
     cl_device_id device() const { return device_; }
@@ -94,6 +95,8 @@ public:
     device_id_t device_id() const override {
         return std::make_tuple(0, reinterpret_cast<uint64_t>(device()), 0);
     }
+
+    status_t serialize_device(serialization_stream_t &sstream) const override;
 
 #ifdef DNNL_USE_RT_OBJECTS_IN_PRIMITIVE_CACHE
     engine_id_t engine_id() const override {

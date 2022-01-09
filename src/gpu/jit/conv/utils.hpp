@@ -27,6 +27,7 @@
 #include <unordered_set>
 
 #include "common/utils.hpp"
+#include "gpu/compute/device_info.hpp"
 
 namespace dnnl {
 namespace impl {
@@ -37,7 +38,12 @@ namespace ir_utils {
 const int LOG_OFF = 0;
 const int LOG_WARNING = 100;
 const int LOG_TRACE = 200;
+
+#ifdef GEN_CONV_DEBUG
+const int LOG_LEVEL = LOG_WARNING;
+#else
 const int LOG_LEVEL = LOG_OFF;
+#endif
 
 template <typename T>
 size_t get_hash(const T &t);
@@ -317,6 +323,36 @@ inline std::string getenv_str(const char *s, const std::string &def) {
     int ret = getenv(s, buf, sizeof(buf));
     if (ret > 0) return buf;
     return def;
+}
+
+// Input is a comma separate list containing gpu_arch and optionally eu_count.
+inline compute::gpu_arch_t getenv_gpu(const char *s, compute::gpu_arch_t arch,
+        int *eu_count = nullptr, size_t *max_wg_size = nullptr) {
+    char buf[1024];
+    int ret = getenv(s, buf, sizeof(buf));
+    if (ret > 0) {
+        char *arch_str = buf, *eu_str = nullptr;
+        for (int i = 0; i < ret; i++) {
+            if (buf[i] == ',') {
+                buf[i] = 0;
+                if (i < ret - 1) { eu_str = &buf[i + 1]; }
+                break;
+            }
+        }
+        arch = compute::str2gpu_arch(arch_str);
+        if (eu_count && eu_str) { *eu_count = atoi(eu_str); }
+        if (max_wg_size) {
+            // Assume maximum wg size is basically the number of threads
+            // available in a subslice with simd_size 16
+            const size_t max_eus_per_wg
+                    = compute::device_info_t::max_eus_per_wg(arch);
+            const size_t simd_size = 16;
+            const size_t thr_per_eu = utils::rnd_down_pow2(
+                    compute::device_info_t::threads_per_eu(arch));
+            *max_wg_size = simd_size * max_eus_per_wg * thr_per_eu;
+        }
+    }
+    return arch;
 }
 
 inline std::string to_string(bool b) {

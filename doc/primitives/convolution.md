@@ -459,7 +459,7 @@ the convolution.)
      Intel DL Boost instruction sets
    - Run-time output scales are not supported
    - Integer \dst is not supported for floating point \src and \weights
-   - f16/bf16 \dst is not supported for integer \src and \weights
+   - f16 \dst is not supported for integer \src and \weights
    - backward convolution with bias is not supported
 
 ## Performance Tips
@@ -468,8 +468,8 @@ the convolution.)
   memory format tags when create a convolution primitive to allow the library
   to choose the most appropriate memory format.
 
-## Examples
+## Example
 
-### @ref convolution_example_cpp - CPU/GPU
+[Convolution Primitive Example](@ref convolution_example_cpp)
 
 @copydetails convolution_example_cpp_short

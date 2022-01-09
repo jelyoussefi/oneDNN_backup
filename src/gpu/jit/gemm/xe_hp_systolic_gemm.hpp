@@ -49,16 +49,26 @@ struct xe_hp_systolic_gemm_t : public gpu_gemm_t {
 
         status_t init(engine_t *engine);
 
-        bool use_fma();
+        bool use_nocopy();
         bool set_default_formats(data_type_t dt);
 
         size_t dyn_offset_a = 0;
         size_t dyn_offset_b = 0;
         size_t dyn_offset_c = 0;
 
+        data_type_t impl_co_type() const {
+            using namespace data_type;
+            return with_bias() ? desc()->bias_type()
+                               : (utils::one_of(desc()->a_type(), s8, u8)
+                                               ? s32
+                                               : desc()->c_type());
+        }
+
         data_type_t impl_acc_type() const {
             using namespace data_type;
-            return utils::one_of(desc()->c_type(), f16, bf16, f32) ? f32 : s32;
+            return utils::one_of(desc()->c_type(), s8, u8, f16, bf16, f32)
+                    ? (utils::one_of(desc()->a_type(), s8, u8) ? s32 : f32)
+                    : s32;
         }
 
         float alpha() const { return attr()->output_scales_.scales_[0]; }
@@ -74,8 +84,9 @@ struct xe_hp_systolic_gemm_t : public gpu_gemm_t {
         }
 
         int bias_cmask() const {
-            unsigned char to_cmask[4] = {0, 2, 1, 3};
-            return with_bias() ? to_cmask[(desc()->bias_mask() >> 1) & 3] : -1;
+            unsigned char to_cmask[8] = {0, 4, 2, 6, 1, 5, 3, 7};
+            assert(unsigned(desc()->bias_mask()) < 8);
+            return with_bias() ? to_cmask[desc()->bias_mask() & 7] : -1;
         }
 
         bool packed_a() const { return packed_a_; }

@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2016-2020 Intel Corporation
+* Copyright 2016-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -247,16 +247,6 @@ protected:
                 : create_md(
                         {pd.mb, pd.c, pd.oh, pd.ow}, data_type, p.dst_format);
 
-        auto p_src = test::make_memory(p_src_desc, eng);
-        auto p_dst = test::make_memory(p_dst_desc, eng);
-
-        fill_data<data_t>(
-                p_src.get_desc().get_size() / sizeof(data_t), p_src, 1., true);
-        fill_data<data_t>(
-                p_dst.get_desc().get_size() / sizeof(data_t), p_dst, 1., true);
-        check_zero_tail<data_t>(1, p_src);
-        check_zero_tail<data_t>(1, p_dst);
-
         memory::dims strides, ker, dilation, pad_l, pad_r;
         if (p.ndims == 5) {
             strides = memory::dims({pd.strd, pd.strh, pd.strw});
@@ -287,6 +277,7 @@ protected:
             SKIP_IF_CUDA(dilation[i] != 0, "Dilation is not supported!");
         }
 
+        memory p_src, p_dst;
         if (pd.dd == 0 && pd.dh == 0 && pd.dw == 0) {
             auto pool_desc = pooling_forward::desc(p.aprop_kind, p.aalgorithm,
                     p_src_desc, p_dst_desc, strides, ker, pad_l, pad_r);
@@ -297,10 +288,23 @@ protected:
                     = pooling_forward::primitive_desc(pool_prim_desc.get());
 
             check_prim_desc<pooling_forward::primitive_desc>(pool_prim_desc);
+            if (p.src_format != memory::format_tag::any) {
+                ASSERT_TRUE(p_src_desc == pool_prim_desc.src_desc());
+            }
 
             auto workspace_desc = pool_prim_desc.workspace_desc();
             workspace = test::make_memory(workspace_desc, eng);
+            p_src = test::make_memory(pool_prim_desc.src_desc(), eng);
+            p_dst = test::make_memory(pool_prim_desc.dst_desc(), eng);
 
+            fill_data<data_t>(p_src.get_desc().get_size() / sizeof(data_t),
+                    p_src, 1., true);
+            fill_data<data_t>(p_dst.get_desc().get_size() / sizeof(data_t),
+                    p_dst, 1., true);
+            check_zero_tail<data_t>(1, p_src);
+            check_zero_tail<data_t>(1, p_dst);
+
+            EXPECT_ANY_THROW(pooling_forward(pool_prim_desc, {}));
             pooling_forward(pool_prim_desc)
                     .execute(strm,
                             {{DNNL_ARG_SRC, p_src}, {DNNL_ARG_DST, p_dst},
@@ -316,10 +320,23 @@ protected:
                     = pooling_v2_forward::primitive_desc(pool_prim_desc.get());
 
             check_prim_desc<pooling_v2_forward::primitive_desc>(pool_prim_desc);
+            if (p.src_format != memory::format_tag::any) {
+                ASSERT_TRUE(p_src_desc == pool_prim_desc.src_desc());
+            }
 
             auto workspace_desc = pool_prim_desc.workspace_desc();
             workspace = test::make_memory(workspace_desc, eng);
+            p_src = test::make_memory(pool_prim_desc.src_desc(), eng);
+            p_dst = test::make_memory(pool_prim_desc.dst_desc(), eng);
 
+            fill_data<data_t>(p_src.get_desc().get_size() / sizeof(data_t),
+                    p_src, 1., true);
+            fill_data<data_t>(p_dst.get_desc().get_size() / sizeof(data_t),
+                    p_dst, 1., true);
+            check_zero_tail<data_t>(1, p_src);
+            check_zero_tail<data_t>(1, p_dst);
+
+            EXPECT_ANY_THROW(pooling_v2_forward(pool_prim_desc, {}));
             pooling_v2_forward(pool_prim_desc)
                     .execute(strm,
                             {{DNNL_ARG_SRC, p_src}, {DNNL_ARG_DST, p_dst},
@@ -769,6 +786,12 @@ INSTANTIATE_TEST_SUITE_P(TestPoolingForwardEF, pooling_test_float,
                         memory::format_tag::nchw,
                         EXPAND_SIZES_2D(
                                 2, 4, 4, 4, 4, 4, 3, 3, 0, 0, 1, 1, 1, 1),
+                        true, dnnl_invalid_arguments},
+                pool_test_params_t {prop_kind::forward_inference,
+                        algorithm::pooling_max, memory::format_tag::any,
+                        memory::format_tag::nChw16c,
+                        EXPAND_SIZES_2D(
+                                4, 14, 60, 60, 31, 31, 2, 3, 1, 1, 1, 1, 2, 2),
                         true, dnnl_invalid_arguments}));
 
 INSTANTIATE_TEST_SUITE_P(TestPooling_nChw16c_with_padded, pooling_test_float,

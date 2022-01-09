@@ -41,10 +41,8 @@ namespace ocl {
 // 2. GPU -> CPU copying
 struct cross_engine_reorder_t : public gpu_primitive_t {
     using gpu_primitive_t::gpu_primitive_t;
-    struct pd_t : public reorder_pd_t {
-        using reorder_pd_t::reorder_pd_t;
-
-        pd_t(const pd_t &rhs) = default;
+    struct pd_t : public gpu_reorder_pd_t {
+        using gpu_reorder_pd_t::gpu_reorder_pd_t;
 
         DECLARE_COMMON_PD_T("ocl:cross_engine::any", cross_engine_reorder_t);
 
@@ -62,16 +60,10 @@ struct cross_engine_reorder_t : public gpu_primitive_t {
 
     status_t init(engine_t *engine) override {
         if (!pd()->do_reorder_) return status::success;
-        auto status = pd()->reorder_pd_->create_primitive(reorder_, engine);
-        return status;
+        return create_nested_primitive(reorder_, pd()->reorder_pd_, engine);
     }
 
     status_t execute(const exec_ctx_t &ctx) const override;
-
-protected:
-    primitive_list_t nested_primitives() const override {
-        return {reorder_.get()};
-    }
 
 private:
     const pd_t *pd() const { return (const pd_t *)primitive_t::pd().get(); }

@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2018-2021 Intel Corporation
+* Copyright 2018-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
 *******************************************************************************/
 
 // DO NOT EDIT, AUTO-GENERATED
+// Use this script to update the file: scripts/generate_dnnl_debug.py
 
 // clang-format off
 
@@ -557,6 +558,21 @@ const char *dnnl_fmt_tag2str(dnnl_format_tag_t v) {
     if (v == dnnl_BA4b8a16b4a) return "BA4b8a16b4a";
     if (v == dnnl_aCB4c8b16c2b) return "aCB4c8b16c2b";
     if (v == dnnl_aCB4c8b16c4b) return "aCB4c8b16c4b";
+    if (v == dnnl_BA16a16b) return "BA16a16b";
+    if (v == dnnl_BA16a32b) return "BA16a32b";
+    if (v == dnnl_BA16a48b) return "BA16a48b";
+    if (v == dnnl_BA16a64b) return "BA16a64b";
+    if (v == dnnl_aCB16c2b) return "aCB16c2b";
+    if (v == dnnl_aCB16c4b) return "aCB16c4b";
+    if (v == dnnl_BA16b2a) return "BA16b2a";
+    if (v == dnnl_BA16b4a) return "BA16b4a";
+    if (v == dnnl_aBC16b16c) return "aBC16b16c";
+    if (v == dnnl_aBC16b32c) return "aBC16b32c";
+    if (v == dnnl_AB16a16b) return "AB16a16b";
+    if (v == dnnl_AB16a32b) return "AB16a32b";
+    if (v == dnnl_adbc) return "adbc";
+    if (v == dnnl_ABcde16a16b2a) return "ABcde16a16b2a";
+    if (v == dnnl_aBCdef16b16c2b) return "aBCdef16b16c2b";
     if (v == dnnl_format_tag_last) return "format_tag_last";
     if (v == dnnl_x) return "x";
     if (v == dnnl_nc) return "nc";
@@ -736,6 +752,7 @@ const char *dnnl_fmt_tag2str(dnnl_format_tag_t v) {
     if (v == dnnl_IOdhw16i16o) return "IOdhw16i16o";
     if (v == dnnl_OIdhw4o8i8o4i) return "OIdhw4o8i8o4i";
     if (v == dnnl_IOdhw16o16i) return "IOdhw16o16i";
+    if (v == dnnl_OIdhw16o16i2o) return "OIdhw16o16i2o";
     if (v == dnnl_Goiw16g) return "Goiw16g";
     if (v == dnnl_Goiw8g) return "Goiw8g";
     if (v == dnnl_Goiw4g) return "Goiw4g";
@@ -828,6 +845,7 @@ const char *dnnl_fmt_tag2str(dnnl_format_tag_t v) {
     if (v == dnnl_gOIdhw2i8o4i) return "gOIdhw2i8o4i";
     if (v == dnnl_gOIdhw16i16o2i) return "gOIdhw16i16o2i";
     if (v == dnnl_gOIdhw16o16i) return "gOIdhw16o16i";
+    if (v == dnnl_gOIdhw16o16i2o) return "gOIdhw16o16i2o";
     if (v == dnnl_gOidhw16o) return "gOidhw16o";
     if (v == dnnl_gOIdhw4i4o) return "gOIdhw4i4o";
     if (v == dnnl_gOIdhw4o4i) return "gOIdhw4o4i";

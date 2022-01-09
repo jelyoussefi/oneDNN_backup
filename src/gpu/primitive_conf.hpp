@@ -339,6 +339,10 @@ struct conv_conf_t {
     data_type_t bias_data_type;
     data_type_t dst_data_type;
     data_type_t acc_data_type;
+
+    memory_desc_info_t src_md_info;
+    memory_desc_info_t wei_md_info;
+    memory_desc_info_t dst_md_info;
 };
 
 // Pooling
@@ -355,6 +359,7 @@ struct pool_conf_t {
     data_type_t src_dt;
     data_type_t dst_dt;
     alg_kind_t alg;
+    bool is_plain;
     bool is_training, is_backward;
     bool use_mb_c_block, use_only_c_block;
     int chunks_per_c_block, chunks_per_mb_block;
@@ -871,6 +876,13 @@ inline void set_default_conf(conv_conf_t &conf, const convolution_desc_t &cd,
     conf.bias_data_type
             = conf.with_bias ? bias_mdw.data_type() : data_type::f32;
 
+    if (!src_mdw.format_any())
+        conf.src_md_info = memory_desc_info_t::create(src_mdw);
+    if (!weights_mdw.format_any())
+        conf.wei_md_info = memory_desc_info_t::create(weights_mdw);
+    if (!dst_mdw.format_any())
+        conf.dst_md_info = memory_desc_info_t::create(dst_mdw);
+
     conf.attr_info = attr_info_t::create(&attr);
 }
 
@@ -1048,8 +1060,9 @@ inline bool post_ops_with_binary_ok(const primitive_attr_t *attr,
 
     bool is_po_ok = true;
     for (int po_idx = 0; po_idx < p.len(); ++po_idx) {
-        is_po_ok &= is_eltwise(po_idx) | is_sum(po_idx) | is_binary(po_idx)
-                | is_prelu(po_idx);
+        is_po_ok = is_po_ok
+                && (is_eltwise(po_idx) || is_sum(po_idx) || is_binary(po_idx)
+                        || is_prelu(po_idx));
         if (is_binary(po_idx)) {
             const auto &bin_desc = p.entry_[po_idx].binary.src1_desc;
             if (bin_desc.ndims > max_ndims_supported) {
@@ -1252,11 +1265,10 @@ inline int append_post_ops_to_arg_list_base(const exec_args_t &args,
             auto arg = args.at(
                     DNNL_ARG_ATTR_MULTIPLE_POST_OP(po_idx) | DNNL_ARG_WEIGHTS);
             assert(arg.is_const);
-            auto &binary_arg = arg.mem
+            auto &prelu_wei_arg = arg.mem
                     ? *(arg.mem->memory_storage())
                     : dnnl::impl::memory_storage_t::empty_storage();
-            arg_list.set(post_op_idx++, binary_arg);
-
+            arg_list.set(post_op_idx++, prelu_wei_arg);
         } else {
             arg_list.set(post_op_idx++, memory_storage_t::empty_storage());
         }
@@ -1310,7 +1322,6 @@ inline void def_attr_info(compute::kernel_ctx_t &kernel_ctx,
     kernel_ctx.define_int("WITH_ELTWISE", attr_info.with_eltwise);
     kernel_ctx.define_int("ELTWISE_IDX", attr_info.eltwise_idx);
     kernel_ctx.define_int("ELTWISE_ALG", attr_info.eltwise_alg);
-    kernel_ctx.define_int("ELTWISE_ALPHA0", attr_info.eltwise_alpha == 0.0f);
 
     kernel_ctx.define_int("WITH_SUM", attr_info.with_sum);
     kernel_ctx.define_int("SUM_IDX", attr_info.sum_idx);
@@ -1321,6 +1332,8 @@ inline void def_attr_info(compute::kernel_ctx_t &kernel_ctx,
     kernel_ctx.define_int("WITH_SRC1_SCALE", attr_info.with_src1_scale);
 
     kernel_ctx.define_int("WITH_SCALES", attr_info.with_oscales);
+    kernel_ctx.define_int(
+            "WITH_RUNTIME_SCALES", attr_info.with_runtime_oscales);
     kernel_ctx.define_int("SCALES_PER_OC", attr_info.with_per_oc_oscales);
     kernel_ctx.define_int("SCALES_COMMON", attr_info.with_common_oscales);
 

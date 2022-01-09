@@ -325,10 +325,23 @@ struct primitive : public handle<dnnl_primitive_t> {
     /// @param c_pd C API primitive descriptor.
     primitive(const_dnnl_primitive_desc_t c_pd);
 
+    /// Constructs a primitive from a C API primitive descriptor and a cache blob.
+    ///
+    /// @param c_pd C API primitive descriptor.
+    /// @param cache_blob Cache blob.
+    primitive(const_dnnl_primitive_desc_t c_pd,
+            const std::vector<uint8_t> &cache_blob);
+
     /// Constructs a primitive from a primitive descriptor.
     ///
     /// @param pd Primitive descriptor.
     primitive(const primitive_desc &pd);
+
+    /// Constructs a primitive from a primitive descriptor and a cache blob.
+    ///
+    /// @param pd Primitive descriptor.
+    /// @param cache_blob Cache blob.
+    primitive(const primitive_desc &pd, const std::vector<uint8_t> &cache_blob);
 
     /// Returns the C API primitive descriptor of the underlying C API
     /// primitive.
@@ -340,6 +353,15 @@ struct primitive : public handle<dnnl_primitive_t> {
     ///
     /// @returns The primitive kind.
     inline kind get_kind() const;
+
+    /// Returns a cache blob for the primitive.
+    ///
+    /// @returns Vector containing the cache blob.
+    ///
+    /// @note The cache blob can be empty. It's the user's responsibility to
+    ///     check whether it's empty prior to passing it to the primitive
+    ///     constructor.
+    inline std::vector<uint8_t> get_cache_blob() const;
 
     /// Executes computations specified by the primitive in a specified stream.
     ///
@@ -381,6 +403,18 @@ dnnl::primitive::kind primitive::get_kind() const {
                               pd, dnnl_query_primitive_kind, 0, (void *)&kind),
             "could not get a primitive kind from a primitive descriptor");
     return static_cast<dnnl::primitive::kind>(kind);
+}
+
+std::vector<uint8_t> primitive::get_cache_blob() const {
+    size_t size;
+    error::wrap_c_api(dnnl_primitive_get_cache_blob(get(), &size, nullptr),
+            "could not get cache blob size from a primitive");
+
+    std::vector<uint8_t> cache_blob(size);
+    error::wrap_c_api(
+            dnnl_primitive_get_cache_blob(get(), &size, cache_blob.data()),
+            "could not get a cache blob from a primitive");
+    return cache_blob;
 }
 
 /// @} dnnl_api_primitives_common
@@ -824,6 +858,12 @@ enum class query {
 
     /// propagation kind
     prop_kind = dnnl_query_prop_kind,
+
+    /// size of cache blob ID in bytes
+    cache_blob_id_size_s64 = dnnl_query_cache_blob_id_size_s64,
+
+    /// cache blob ID (pointer to array)
+    cache_blob_id = dnnl_query_cache_blob_id,
 
     /// operation descriptor
     op_d = dnnl_query_op_d,
@@ -1288,6 +1328,8 @@ struct memory : public handle<dnnl_memory_t> {
         acbd = dnnl_acbd,
         /// permuted 4D tensor
         acdb = dnnl_acdb,
+        /// permuted 4D tensor
+        adbc = dnnl_adbc,
         /// permuted 4D tensor
         bacd = dnnl_bacd,
         /// permuted 4D tensor
@@ -1820,6 +1862,10 @@ struct memory : public handle<dnnl_memory_t> {
         aBC48b32c = dnnl_aBC48b32c,
         ABcd40a16b = dnnl_ABcd40a16b,
         ABcd40a32b = dnnl_ABcd40a32b,
+        BA16a16b = dnnl_BA16a16b,
+        BA16a32b = dnnl_BA16a32b,
+        BA16a48b = dnnl_BA16a48b,
+        BA16a64b = dnnl_BA16a64b,
         BA16a16b2a = dnnl_BA16a16b2a,
         BA16a32b2a = dnnl_BA16a32b2a,
         BA16a48b2a = dnnl_BA16a48b2a,
@@ -1929,6 +1975,7 @@ struct memory : public handle<dnnl_memory_t> {
         OIdhw16i32o = dnnl_OIdhw16i32o,
         OIdhw16i64o = dnnl_OIdhw16i64o,
         OIdhw16o16i = dnnl_OIdhw16o16i,
+        OIdhw16o16i2o = dnnl_OIdhw16o16i2o,
         Oidhw16o = dnnl_Oidhw16o,
         OIdhw4i4o = dnnl_OIdhw4i4o,
         OIdhw4o4i = dnnl_OIdhw4o4i,
@@ -2022,6 +2069,7 @@ struct memory : public handle<dnnl_memory_t> {
         gOdhwi8o = dnnl_gOdhwi8o,
         gOIdhw16i16o = dnnl_gOIdhw16i16o,
         gOIdhw16o16i = dnnl_gOIdhw16o16i,
+        gOIdhw16o16i2o = dnnl_gOIdhw16o16i2o,
         gOidhw16o = dnnl_gOidhw16o,
         gOIdhw4i4o = dnnl_gOIdhw4i4o,
         gOIdhw4o4i = dnnl_gOIdhw4o4i,
@@ -2371,6 +2419,16 @@ struct memory : public handle<dnnl_memory_t> {
         BA4b8a16b4a = dnnl_BA4b8a16b4a,
         aCB4c8b16c2b = dnnl_aCB4c8b16c2b,
         aCB4c8b16c4b = dnnl_aCB4c8b16c4b,
+        aCB16c2b = dnnl_aCB16c2b,
+        aCB16c4b = dnnl_aCB16c4b,
+        BA16b2a = dnnl_BA16b2a,
+        BA16b4a = dnnl_BA16b4a,
+        aBC16b16c = dnnl_aBC16b16c,
+        aBC16b32c = dnnl_aBC16b32c,
+        AB16a16b = dnnl_AB16a16b,
+        AB16a32b = dnnl_AB16a32b,
+        ABcde16a16b2a = dnnl_ABcde16a16b2a,
+        aBCdef16b16c2b = dnnl_aBCdef16b16c2b,
     };
 
     /// A memory descriptor.
@@ -3049,7 +3107,7 @@ struct post_ops : public handle<dnnl_post_ops_t> {
                                   memory::convert_to_c(weights_data_type),
                                   memory::convert_to_c(bias_data_type),
                                   memory::convert_to_c(dst_data_type),
-                                  scales.size(), mask, &scales[0]),
+                                  scales.size(), mask, scales.data()),
                 "could not append depthwise post-op");
     }
 
@@ -3134,7 +3192,7 @@ struct post_ops : public handle<dnnl_post_ops_t> {
                                   memory::convert_to_c(weights_data_type),
                                   memory::convert_to_c(bias_data_type),
                                   memory::convert_to_c(dst_data_type),
-                                  scales.size(), mask, &scales[0]),
+                                  scales.size(), mask, scales.data()),
                 "could not append depthwise post-op");
     }
 
@@ -3952,6 +4010,25 @@ struct primitive_desc_base : public handle<dnnl_primitive_desc_t> {
         return static_cast<dnnl::primitive::kind>(kind);
     }
 
+    /// Returns the cache blob ID of the primitive descriptor.
+    /// @returns The cache blob ID of the primitive descriptor.
+    std::vector<uint8_t> get_cache_blob_id() const {
+        dnnl_dim_t count;
+        const uint8_t *c_id;
+        error::wrap_c_api(
+                dnnl_primitive_desc_query(get(),
+                        dnnl::convert_to_c(query::cache_blob_id_size_s64), 0,
+                        (void *)&count),
+                "could not get size of cache blob ID from a primitive "
+                "descriptor");
+        error::wrap_c_api(dnnl_primitive_desc_query(get(),
+                                  dnnl::convert_to_c(query::cache_blob_id), 0,
+                                  (void **)&c_id),
+                "could not get cache blob ID from a primitive descriptor");
+        std::vector<uint8_t> id(c_id, c_id + count);
+        return id;
+    }
+
 protected:
     /// Resets the value of the handle to a clone of a C API primitive
     /// descriptor.
@@ -4170,6 +4247,12 @@ struct reorder : public primitive {
     /// @param pd Primitive descriptor for reorder primitive.
     reorder(const primitive_desc &pd) : primitive(pd.get()) {}
 
+    /// Constructs a reorder primitive from a cache blob.
+    /// @param pd Primitive descriptor for reorder primitive.
+    /// @param cache_blob Cache blob.
+    reorder(const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd.get(), cache_blob) {}
+
     /// Constructs a reorder primitive that would reorder data between memory
     /// objects having the same memory descriptors as memory objects @p src and
     /// @p dst.
@@ -4296,6 +4379,12 @@ struct concat : public primitive {
     /// Constructs a concatenation primitive.
     /// @param pd Primitive descriptor for concatenation primitive.
     concat(const primitive_desc &pd) : primitive(pd.get()) {}
+
+    /// Constructs a concatenation primitive from a cache blob.
+    /// @param pd Primitive descriptor for concatenation primitive.
+    /// @param cache_blob Cache blob.
+    concat(const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd.get(), cache_blob) {}
 };
 
 /// @} dnnl_api_concat
@@ -4393,6 +4482,12 @@ struct sum : public primitive {
     /// Constructs a sum primitive.
     /// @param pd Primitive descriptor for sum primitive.
     sum(const primitive_desc &pd) : primitive(pd.get()) {}
+
+    /// Constructs a sum primitive from a cache blob.
+    /// @param pd Primitive descriptor for sum primitive.
+    /// @param cache_blob Cache blob.
+    sum(const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd.get(), cache_blob) {}
 };
 
 /// @} dnnl_api_sum
@@ -4753,6 +4848,15 @@ struct convolution_forward : public primitive {
     /// @param pd Primitive descriptor for a convolution forward propagation
     ///     primitive.
     convolution_forward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a convolution forward propagation primitive from a cache
+    ///     blob.
+    /// @param pd Primitive descriptor for a convolution forward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    convolution_forward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// Convolution backward propagation primitive.
@@ -4922,6 +5026,15 @@ struct convolution_backward_data : public primitive {
     /// @param pd Primitive descriptor for a convolution backward propagation
     ///     primitive.
     convolution_backward_data(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a convolution backward propagation primitive from a cache
+    ///     blob.
+    /// @param pd Primitive descriptor for a convolution backward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    convolution_backward_data(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// Convolution weights gradient primitive.
@@ -5192,6 +5305,14 @@ struct convolution_backward_weights : public primitive {
     /// @param pd Primitive descriptor for a convolution weights gradient
     ///     primitive.
     convolution_backward_weights(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a convolution weights gradient primitive from a cache blob.
+    /// @param pd Primitive descriptor for a convolution weights gradient
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    convolution_backward_weights(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// @} dnnl_api_convolution
@@ -5467,6 +5588,15 @@ struct deconvolution_forward : public primitive {
     /// @param pd Primitive descriptor for a deconvolution forward propagation
     ///     primitive.
     deconvolution_forward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a deconvolution forward propagation primitive from a cache
+    ///     blob.
+    /// @param pd Primitive descriptor for a deconvolution forward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    deconvolution_forward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// Deconvolution backward propagation primitive.
@@ -5633,6 +5763,15 @@ struct deconvolution_backward_data : public primitive {
     /// @param pd Primitive descriptor for a deconvolution backward propagation
     ///     primitive.
     deconvolution_backward_data(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a deconvolution backward propagation primitive from a cache
+    ///     blob.
+    /// @param pd Primitive descriptor for a deconvolution backward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    deconvolution_backward_data(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// Deconvolution weights gradient primitive.
@@ -5898,6 +6037,15 @@ struct deconvolution_backward_weights : public primitive {
     /// @param pd Primitive descriptor for a deconvolution weights gradient
     ///     primitive.
     deconvolution_backward_weights(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a deconvolution weights gradient primitive from a cache
+    ///     blob.
+    /// @param pd Primitive descriptor for a deconvolution weights gradient
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    deconvolution_backward_weights(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// @} dnnl_api_deconvolution
@@ -6004,6 +6152,14 @@ struct lrn_forward : public primitive {
     /// @param pd Primitive descriptor for an LRN forward propagation
     ///     primitive.
     lrn_forward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs an LRN forward propagation primitive from a cache blob.
+    /// @param pd Primitive descriptor for an LRN forward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    lrn_forward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// Local response normalization (LRN) backward propagation primitive.
@@ -6106,6 +6262,14 @@ struct lrn_backward : public primitive {
     /// @param pd Primitive descriptor for an LRN backward propagation
     ///     primitive.
     lrn_backward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs an LRN backward propagation primitive from a cache blob.
+    /// @param pd Primitive descriptor for an LRN backward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    lrn_backward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// @} dnnl_api_lrn
@@ -6228,6 +6392,14 @@ struct pooling_forward : public primitive {
     /// @param pd Primitive descriptor for a pooling forward propagation
     ///     primitive.
     pooling_forward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a pooling forward propagation primitive from a cache blob.
+    /// @param pd Primitive descriptor for a pooling forward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    pooling_forward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// Pooling backward propagation primitive.
@@ -6345,6 +6517,14 @@ struct pooling_backward : public primitive {
     /// @param pd Primitive descriptor for a pooling backward propagation
     ///     primitive.
     pooling_backward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a pooling backward propagation primitive froma cache blob.
+    /// @param pd Primitive descriptor for a pooling backward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    pooling_backward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// @} dnnl_api_pooling
@@ -6461,6 +6641,14 @@ struct eltwise_forward : public primitive {
     /// @param pd Primitive descriptor for an eltwise forward propagation
     ///     primitive.
     eltwise_forward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs an eltwise forward propagation primitive from a cache blob.
+    /// @param pd Primitive descriptor for an eltwise forward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    eltwise_forward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// Elementwise unary operation backward propagation primitive.
@@ -6564,6 +6752,14 @@ struct eltwise_backward : public primitive {
     /// @param pd Primitive descriptor for an eltwise backward propagation
     ///     primitive.
     eltwise_backward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs an eltwise backward propagation primitive from a cache blob.
+    /// @param pd Primitive descriptor for an eltwise backward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    eltwise_backward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// @} dnnl_api_eltwise
@@ -6664,6 +6860,14 @@ struct softmax_forward : public primitive {
     /// @param pd Primitive descriptor for a softmax forward propagation
     ///     primitive.
     softmax_forward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a softmax forward propagation primitive from a cache blob.
+    /// @param pd Primitive descriptor for a softmax forward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    softmax_forward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// Softmax backward propagation primitive.
@@ -6764,6 +6968,14 @@ struct softmax_backward : public primitive {
     /// @param pd Primitive descriptor for a softmax backward propagation
     ///     primitive.
     softmax_backward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a softmax backward propagation primitive from a cache blob.
+    /// @param pd Primitive descriptor for a softmax backward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    softmax_backward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// @} dnnl_api_softmax
@@ -6868,6 +7080,15 @@ struct logsoftmax_forward : public primitive {
     /// @param pd Primitive descriptor for a logsoftmax forward propagation
     ///     primitive.
     logsoftmax_forward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a logsoftmax forward propagation primitive from a cache
+    ///     blob.
+    /// @param pd Primitive descriptor for a logsoftmax forward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    logsoftmax_forward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// Logsoftmax backward propagation primitive.
@@ -6972,6 +7193,15 @@ struct logsoftmax_backward : public primitive {
     /// @param pd Primitive descriptor for a logsoftmax backward propagation
     ///     primitive.
     logsoftmax_backward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a logsoftmax backward propagation primitive from a cache
+    ///     blob.
+    /// @param pd Primitive descriptor for a logsoftmax backward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    logsoftmax_backward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// @} dnnl_api_logsoftmax
@@ -7123,6 +7353,15 @@ struct batch_normalization_forward : public primitive {
     /// @param pd Primitive descriptor for a batch normalization forward
     ///     propagation primitive.
     batch_normalization_forward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a batch normalization forward propagation primitive from
+    ///     a cache blob.
+    /// @param pd Primitive descriptor for a batch normalization forward
+    ///     propagation primitive.
+    /// @param cache_blob Cache blob.
+    batch_normalization_forward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// Batch normalization backward propagation primitive.
@@ -7252,6 +7491,15 @@ struct batch_normalization_backward : public primitive {
     /// @param pd Primitive descriptor for a batch normalization backward
     ///     propagation primitive.
     batch_normalization_backward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a batch normalization backward propagation primitive from
+    ///     a cache blob.
+    /// @param pd Primitive descriptor for a batch normalization backward
+    ///     propagation primitive.
+    /// @param cache_blob Cache blob.
+    batch_normalization_backward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// @} dnnl_api_batch_normalization
@@ -7421,6 +7669,15 @@ struct layer_normalization_forward : public primitive {
     /// @param pd Primitive descriptor for a layer normalization forward
     ///     propagation primitive.
     layer_normalization_forward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a layer normalization forward propagation primitive from
+    ///     a cache blob.
+    /// @param pd Primitive descriptor for a layer normalization forward
+    ///     propagation primitive.
+    /// @param cache_blob Cache blob.
+    layer_normalization_forward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// Layer normalization backward propagation primitive.
@@ -7575,6 +7832,15 @@ struct layer_normalization_backward : public primitive {
     /// @param pd Primitive descriptor for a layer normalization backward
     ///     propagation primitive.
     layer_normalization_backward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a layer normalization backward propagation primitive from
+    ///     a cache blob.
+    /// @param pd Primitive descriptor for a layer normalization backward
+    ///     propagation primitive.
+    /// @param cache_blob Cache blob.
+    layer_normalization_backward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// @} dnnl_api_layer_normalization
@@ -7604,9 +7870,9 @@ struct inner_product_forward : public primitive {
         ///     #dnnl::prop_kind::forward_training, and
         ///     #dnnl::prop_kind::forward_inference.
         /// @param src_desc Memory descriptor for src.
-        /// @param weights_desc Memory descriptor for diff weights.
-        /// @param bias_desc Memory descriptor for diff bias.
-        /// @param dst_desc Memory descriptor for diff dst.
+        /// @param weights_desc Memory descriptor for weights.
+        /// @param bias_desc Memory descriptor for bias.
+        /// @param dst_desc Memory descriptor for dst.
         desc(prop_kind aprop_kind, const memory::desc &src_desc,
                 const memory::desc &weights_desc, const memory::desc &bias_desc,
                 const memory::desc &dst_desc) {
@@ -7629,7 +7895,7 @@ struct inner_product_forward : public primitive {
         ///     #dnnl::prop_kind::forward_training, and
         ///     #dnnl::prop_kind::forward_inference.
         /// @param src_desc Memory descriptor for src.
-        /// @param weights_desc Memory descriptor for diff weights.
+        /// @param weights_desc Memory descriptor for weights.
         /// @param dst_desc Memory descriptor for dst.
         desc(prop_kind aprop_kind, const memory::desc &src_desc,
                 const memory::desc &weights_desc,
@@ -7710,6 +7976,15 @@ struct inner_product_forward : public primitive {
     /// @param pd Primitive descriptor for an inner product forward
     ///     propagation primitive.
     inner_product_forward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs an inner product forward propagation primitive from
+    ///     a cache blob.
+    /// @param pd Primitive descriptor for an inner product forward
+    ///     propagation primitive.
+    /// @param cache_blob Cache blob.
+    inner_product_forward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// Inner product backward propagation primitive.
@@ -7812,6 +8087,15 @@ struct inner_product_backward_data : public primitive {
     /// @param pd Primitive descriptor for an inner product backward
     ///     propagation primitive.
     inner_product_backward_data(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs an inner product backward propagation primitive from
+    /// a cache blob.
+    /// @param pd Primitive descriptor for an inner product backward
+    ///     propagation primitive.
+    /// @param cache_blob Cache blob.
+    inner_product_backward_data(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// Inner product weights gradient primitive.
@@ -7944,6 +8228,15 @@ struct inner_product_backward_weights : public primitive {
     /// @param pd Primitive descriptor for an inner product weights gradient
     ///     primitive.
     inner_product_backward_weights(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs an inner product weights gradient primitive from a cache
+    ///     blob.
+    /// @param pd Primitive descriptor for an inner product weights gradient
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    inner_product_backward_weights(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// @} dnnl_api_inner_product
@@ -8322,6 +8615,15 @@ struct vanilla_rnn_forward : public primitive {
     /// @param pd Primitive descriptor for a vanilla RNN forward
     ///     propagation primitive.
     vanilla_rnn_forward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a vanilla RNN forward propagation primitive from
+    ///     a cache blob.
+    /// @param pd Primitive descriptor for a vanilla RNN forward
+    ///     propagation primitive.
+    /// @param cache_blob Cache blob.
+    vanilla_rnn_forward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// Vanilla RNN backward propagation primitive.
@@ -8549,6 +8851,15 @@ struct vanilla_rnn_backward : public primitive {
     /// @param pd Primitive descriptor for a vanilla RNN backward
     ///     propagation primitive.
     vanilla_rnn_backward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a vanilla RNN backward propagation primitive from
+    ///     a cache blob.
+    /// @param pd Primitive descriptor for a vanilla RNN backward
+    ///     propagation primitive.
+    /// @param cache_blob Cache blob.
+    vanilla_rnn_backward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// LSTM forward propagation primitive.
@@ -8866,6 +9177,14 @@ struct lstm_forward : public primitive {
     /// @param pd Primitive descriptor for an LSTM forward propagation
     ///     primitive.
     lstm_forward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs an LSTM forward propagation primitive from a cache blob.
+    /// @param pd Primitive descriptor for an LSTM forward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    lstm_forward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// LSTM backward propagation primitive.
@@ -9370,6 +9689,14 @@ struct lstm_backward : public primitive {
     /// @param pd Primitive descriptor for an LSTM backward propagation
     ///     primitive.
     lstm_backward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs an LSTM backward propagation primitive from a cache blob.
+    /// @param pd Primitive descriptor for an LSTM backward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    lstm_backward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// GRU forward propagation primitive.
@@ -9519,6 +9846,14 @@ struct gru_forward : public primitive {
     /// @param pd Primitive descriptor for a GRU forward propagation
     ///     primitive.
     gru_forward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a GRU forward propagation primitive from a cache blob.
+    /// @param pd Primitive descriptor for a GRU forward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    gru_forward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// GRU backward propagation primitive.
@@ -9734,6 +10069,14 @@ struct gru_backward : public primitive {
     /// @param pd Primitive descriptor for a GRU backward propagation
     ///     primitive.
     gru_backward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a GRU backward propagation primitive from a cache blob.
+    /// @param pd Primitive descriptor for a GRU backward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    gru_backward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// LBR GRU forward propagation primitive.
@@ -9886,6 +10229,14 @@ struct lbr_gru_forward : public primitive {
     /// @param pd Primitive descriptor for an LBR GRU forward propagation
     ///     primitive.
     lbr_gru_forward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs an LBR GRU forward propagation primitive from a cache blob.
+    /// @param pd Primitive descriptor for an LBR GRU forward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    lbr_gru_forward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// LBR GRU backward propagation primitive.
@@ -10104,6 +10455,14 @@ struct lbr_gru_backward : public primitive {
     /// @param pd Primitive descriptor for an LBR GRU backward propagation
     ///     primitive.
     lbr_gru_backward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs an LBR GRU backward propagation primitive from a cache blob.
+    /// @param pd Primitive descriptor for an LBR GRU backward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    lbr_gru_backward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// @} dnnl_api_rnn
@@ -10188,6 +10547,14 @@ struct shuffle_forward : public primitive {
     /// @param pd Primitive descriptor for a shuffle forward propagation
     ///     primitive.
     shuffle_forward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a shuffle forward propagation primitive from a cache blob.
+    /// @param pd Primitive descriptor for a shuffle forward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    shuffle_forward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// Shuffle backward propagation primitive.
@@ -10262,6 +10629,14 @@ struct shuffle_backward : public primitive {
     /// @param pd Primitive descriptor for a shuffle backward propagation
     ///     primitive.
     shuffle_backward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a shuffle backward propagation primitive from a cache blob.
+    /// @param pd Primitive descriptor for a shuffle backward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    shuffle_backward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// @} dnnl_api_shuffle
@@ -10362,6 +10737,13 @@ struct binary : public primitive {
     /// @param pd Primitive descriptor for an elementwise binary operation
     ///     primitive.
     binary(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs an elementwise binary operation primitive from a cache blob.
+    /// @param pd Primitive descriptor for an elementwise binary operation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    binary(const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// @} dnnl_api_binary
@@ -10472,6 +10854,12 @@ struct matmul : public primitive {
     /// Constructs a matmul primitive.
     /// @param pd Primitive descriptor for a matmul primitive.
     matmul(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a matmul primitive from a cache blob.
+    /// @param pd Primitive descriptor for a matmul primitive.
+    /// @param cache_blob Cache blob.
+    matmul(const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// @} dnnl_api_matmul
@@ -10628,6 +11016,15 @@ struct resampling_forward : public primitive {
     /// @param pd Primitive descriptor for a resampling forward propagation
     ///     primitive.
     resampling_forward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a resampling forward propagation primitive from a cache
+    ///     blob.
+    /// @param pd Primitive descriptor for a resampling forward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    resampling_forward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// Resampling backward propagation primitive.
@@ -10742,6 +11139,15 @@ struct resampling_backward : public primitive {
     /// @param pd Primitive descriptor for a resampling backward propagation
     ///     primitive.
     resampling_backward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a resampling backward propagation primitive from a cache
+    ///     blob.
+    /// @param pd Primitive descriptor for a resampling backward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    resampling_backward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// @} dnnl_api_resampling
@@ -10873,6 +11279,15 @@ struct pooling_v2_forward : public primitive {
     /// @param pd Primitive descriptor for a pooling v2
     /// (dilated pooling) forward propagation primitive.
     pooling_v2_forward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a pooling v2 (dilated pooling) forward
+    /// propagation primitive from a cache blob.
+    /// @param pd Primitive descriptor for a pooling v2
+    /// (dilated pooling) forward propagation primitive.
+    /// @param cache_blob Cache blob.
+    pooling_v2_forward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// Pooling v2 (dilated pooling) backward propagation primitive.
@@ -10998,6 +11413,15 @@ struct pooling_v2_backward : public primitive {
     /// @param pd Primitive descriptor for a pooling backward propagation
     ///     primitive.
     pooling_v2_backward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a pooling v2 (dilated pooling) backward
+    /// propagation primitive from a cache blob.
+    /// @param pd Primitive descriptor for a pooling backward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    pooling_v2_backward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// @} dnnl_api_pooling_v2
@@ -11096,6 +11520,14 @@ struct prelu_forward : public primitive {
     /// @param pd Primitive descriptor for a prelu forward propagation
     ///     primitive.
     prelu_forward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a prelu forward propagation primitive from a cache blob.
+    /// @param pd Primitive descriptor for a prelu forward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    prelu_forward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// PReLU backward propagation primitive.
@@ -11196,6 +11628,14 @@ struct prelu_backward : public primitive {
     /// @param pd Primitive descriptor for a prelu backward propagation
     ///     primitive.
     prelu_backward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a prelu backward propagation primitive from a cache blob.
+    /// @param pd Primitive descriptor for a prelu backward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    prelu_backward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// @} dnnl_api_prelu
@@ -11296,6 +11736,12 @@ struct reduction : public primitive {
     /// Constructs a reduction primitive.
     /// @param pd Primitive descriptor for a reduction primitive.
     reduction(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a reduction primitive from a cache blob.
+    /// @param pd Primitive descriptor for a reduction primitive.
+    /// @param cache_blob Cache blob.
+    reduction(const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// @} dnnl_api_reduction
@@ -11339,7 +11785,10 @@ inline const version_t *version() {
     return dnnl_version();
 }
 
-/// @copydoc dnnl_get_default_fpmath_mode()
+/// Returns the floating-point math mode that will be used by default
+/// for all subsequently created primitives.
+///
+/// @returns Output FP math mode.
 inline fpmath_mode get_default_fpmath_mode() {
     dnnl_fpmath_mode_t mode;
     error::wrap_c_api(dnnl_get_default_fpmath_mode(&mode),
@@ -11494,7 +11943,21 @@ inline primitive::primitive(const_dnnl_primitive_desc_t c_pd) {
     reset(result);
 }
 
+inline primitive::primitive(const_dnnl_primitive_desc_t c_pd,
+        const std::vector<uint8_t> &cache_blob) {
+    dnnl_primitive_t result;
+    size_t size = cache_blob.size();
+    const uint8_t *cache_blob_data = cache_blob.data();
+    error::wrap_c_api(dnnl_primitive_create_from_cache_blob(
+                              &result, c_pd, size, cache_blob_data),
+            "could not create a primitive from a cache blob");
+    reset(result);
+}
+
 inline primitive::primitive(const primitive_desc &pd) : primitive(pd.get()) {}
+inline primitive::primitive(
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+    : primitive(pd.get(), cache_blob) {}
 
 inline void primitive::execute(const stream &astream,
         const std::unordered_map<int, memory> &args) const {

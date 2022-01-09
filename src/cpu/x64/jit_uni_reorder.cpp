@@ -960,7 +960,7 @@ struct jit_uni_reorder_kernel_f32_t : public kernel_t, public jit_generator {
                             && all_ip_padding_zero) {
                         const auto reduction_xmm = get_temp_xmm();
                         const auto xmm_reorder_result = Xmm(ur);
-                        uni_vcvttps2dq(reduction_xmm, xmm_reorder_result);
+                        uni_vcvtps2dq(reduction_xmm, xmm_reorder_result);
                         uni_vphaddd(
                                 reduction_xmm, reduction_xmm, reduction_xmm);
                         uni_vphaddd(
@@ -985,7 +985,7 @@ struct jit_uni_reorder_kernel_f32_t : public kernel_t, public jit_generator {
                         const auto xmm_reorder_result_dq = get_temp_xmm();
                         const auto xmm_reorder_result = Xmm(ur);
                         const auto comp_addr = c_addr(c_off[ur]);
-                        uni_vcvttps2dq(
+                        uni_vcvtps2dq(
                                 xmm_reorder_result_dq, xmm_reorder_result);
                         uni_vpaddd_wrapper(xmm_reorder_result_dq, comp_addr);
                         uni_vmovups(comp_addr, xmm_reorder_result_dq);
@@ -994,7 +994,7 @@ struct jit_uni_reorder_kernel_f32_t : public kernel_t, public jit_generator {
 
                     const auto xmm_reorder_result_dq = get_temp_xmm();
                     const auto xmm_reorder_result = Xmm(ur);
-                    uni_vcvttps2dq(xmm_reorder_result_dq, xmm_reorder_result);
+                    uni_vcvtps2dq(xmm_reorder_result_dq, xmm_reorder_result);
 
                     for (int r = ur; r < ur + ur_step; ++r) {
                         if (zero_padding[r] == 0 || !tail_processing) {
@@ -1013,7 +1013,7 @@ struct jit_uni_reorder_kernel_f32_t : public kernel_t, public jit_generator {
                         const auto xmm_reorder_result_dq = get_temp_xmm();
                         const auto xmm_reorder_result = Xmm(ur);
                         const auto comp_addr = c_addr(c_off[ur]);
-                        uni_vcvttps2dq(
+                        uni_vcvtps2dq(
                                 xmm_reorder_result_dq, xmm_reorder_result);
                         uni_vpaddd_wrapper(xmm_reorder_result_dq, comp_addr);
                         uni_vmovss(comp_addr, xmm_reorder_result_dq);
@@ -1266,10 +1266,10 @@ struct jit_uni_reorder_kernel_f32_t : public kernel_t, public jit_generator {
             const int tail_size = prb_.tail(curr_node_id) / unroll_factor;
             const int node_size = prb_.n(curr_node_id) / unroll_factor;
             const Reg64 &reg_loop_cnt = reg_cnt[jit_loop - 1];
-
+            const bool curr_node_has_tail = prb_.tail(curr_node_id) != 0;
             Label loop, if_no_tail, if_end;
 
-            if (prb_.tail(curr_node_id) != 0) {
+            if (curr_node_has_tail) {
                 if (prb_.nodes[curr_node_id].is_parent_empty()) {
                     mov(reg_loop_cnt, tail_size);
                     // Put info that node is being processed with tail.
@@ -1292,13 +1292,14 @@ struct jit_uni_reorder_kernel_f32_t : public kernel_t, public jit_generator {
                     push(reg_tmp_);
                     L(if_end);
                 }
-
-                L(loop);
-            } else {
-                loop_begin(loop, reg_loop_cnt, node_size);
             }
 
             if (prb_.is_tail_in_one_of_child_nodes(curr_node_id)) {
+                if (!curr_node_has_tail) {
+                    mov(reg_loop_cnt, node_size);
+                    mov(data_chunk_addr(curr_node_id), reg_loop_cnt);
+                }
+                L(loop);
                 if (!prb_.nodes[curr_node_id].is_parent_empty()) {
                     Label if_no_tail_in_child_node;
                     mov(reg_tmp_, data_chunk_addr(parent_node_id));
@@ -1309,6 +1310,10 @@ struct jit_uni_reorder_kernel_f32_t : public kernel_t, public jit_generator {
                 } else {
                     mov(data_chunk_addr(curr_node_id), reg_loop_cnt);
                 }
+            } else if (curr_node_has_tail) {
+                L(loop);
+            } else {
+                loop_begin(loop, reg_loop_cnt, node_size);
             }
 
             create_loops(desc, reg_cnt, jit_loop - 1);
@@ -2010,9 +2015,9 @@ status_t jit_uni_reorder_t::pd_t::init(
 }
 
 void jit_uni_reorder_t::pd_t::init_scratchpad() {
-    const memory_desc_wrapper id(src_md());
-    const auto G = with_groups_ ? id.dims()[0] : 1;
-    const auto N = id.dims()[with_groups_ ? 1 : 0];
+    const memory_desc_wrapper od(dst_md());
+    const auto G = with_groups_ ? od.padded_dims()[0] : 1;
+    const auto N = od.padded_dims()[with_groups_ ? 1 : 0];
     static constexpr int cache_line_size = 16;
     const auto wspace_per_thr_size
             = utils::rnd_up(G * N, cache_line_size) * sizeof(int32_t);
@@ -2034,32 +2039,13 @@ status_t jit_uni_reorder_t::pd_t::create(reorder_pd_t **reorder_pd,
     status_t prb_init_status = prb_init(prb, *src_md, *dst_md, attr);
     if (prb_init_status != status::success) return prb_init_status;
 
-    DEBUG({
-        printf("init : ");
-        prb_dump(prb);
-    });
-    // Sort the prb array in increasing sizes of the output stride
-    prb_normalize(prb);
-    DEBUG({
-        printf("norm : ");
-        prb_dump(prb);
-    });
-
-    /* Combine the variables, which appear together on both
-             * sides of the reorder */
-    prb_simplify(prb);
-    DEBUG({
-        printf("smpl : ");
-        prb_dump(prb);
-    });
-
     prb_block_for_cache(prb);
     DEBUG({
         printf("cache: ");
         prb_dump(prb);
     });
 
-    int ndims_ker_max;
+    int ndims_ker_max {};
     int nthr = dnnl_get_max_threads();
     prb_thread_kernel_balance(prb, ndims_ker_max, nthr);
 
@@ -2293,9 +2279,9 @@ void jit_uni_reorder_t::omp_driver(const char *in, char *out,
     int32_t *compensation_reduce_scratch = scratchpad.template get<int32_t>(
             memory_tracking::names::key_reorder_space);
 
-    const memory_desc_wrapper id(pd()->src_md());
-    const auto G = pd()->with_groups_ ? id.dims()[0] : 1;
-    const auto N = id.dims()[pd()->with_groups_ ? 1 : 0];
+    const memory_desc_wrapper od(pd()->dst_md());
+    const auto G = pd()->with_groups_ ? od.padded_dims()[0] : 1;
+    const auto N = od.padded_dims()[pd()->with_groups_ ? 1 : 0];
     static constexpr int cache_line_size = 16;
     const auto wspace_per_thr_size = utils::rnd_up(G * N, cache_line_size);
     const auto wspace_per_thr_bytes = wspace_per_thr_size * sizeof(int32_t);
@@ -2349,48 +2335,36 @@ void jit_uni_reorder_t::reduce_compensation(char *out,
         const int32_t *compensation_reduce_scratch, const int nthr,
         const dim_t wspace_per_thr_size) const {
 
-    const memory_desc_wrapper id(pd()->dst_md());
-    const auto G = pd()->with_groups_ ? id.dims()[0] : 1;
-    const auto N = id.dims()[pd()->with_groups_ ? 1 : 0];
-
     const memory_desc_wrapper od(pd()->dst_md());
     const size_t offset = od.size() - od.additional_buffer_size();
 
     static constexpr auto comp_dt_size = sizeof(int32_t);
-    const size_t zp_offset
-            = offset + (pd()->prb_.req_s8s8_comp ? G * N * comp_dt_size : 0);
     static constexpr int32_t comp_s8s8_shift = 128;
 
-    // zero out the compensation memory in case of padding
-    const auto G_padded = pd()->with_groups_ ? id.padded_dims()[0] : 1;
-    const auto N_padded = id.padded_dims()[pd()->with_groups_ ? 1 : 0];
-    const auto GN_padded_elems = G_padded * N_padded;
+    // Note: We do not need to explicitly zero-out compensation buffer, as the
+    // per_thread buffers are already zeroed out in the padded area.
+    const auto G = pd()->with_groups_ ? od.padded_dims()[0] : 1;
+    const auto N = od.padded_dims()[pd()->with_groups_ ? 1 : 0];
     const auto GN = G * N;
     const bool req_s8s8_comp = pd()->prb_.req_s8s8_comp;
     const bool req_asymmetric_comp = pd()->prb_.req_asymmetric_comp;
+    const size_t zp_offset
+            = offset + (pd()->prb_.req_s8s8_comp ? GN * comp_dt_size : 0);
 
-    if (GN_padded_elems != GN) {
-        if (req_s8s8_comp)
-            std::memset(out + offset, 0, GN_padded_elems * comp_dt_size);
-        if (req_asymmetric_comp)
-            std::memset(out + zp_offset, 0, GN_padded_elems * comp_dt_size);
-    }
-
-    parallel_nd(G, N, [&](int g, int n) {
+    parallel_nd(GN, [&](int idx) {
         int32_t acc = 0;
-        const auto g_n_off = g * N + n;
         for (int ithr = 0; ithr < nthr; ithr++) {
             acc -= compensation_reduce_scratch[ithr * wspace_per_thr_size
-                    + g_n_off];
+                    + idx];
         }
         if (req_s8s8_comp) {
             int32_t *out_comp = reinterpret_cast<int32_t *>(&out[offset]);
-            out_comp[g_n_off] = comp_s8s8_shift * acc;
+            out_comp[idx] = comp_s8s8_shift * acc;
         }
         if (req_asymmetric_comp) {
             int32_t *out_asym_comp
                     = reinterpret_cast<int32_t *>(&out[zp_offset]);
-            out_asym_comp[g_n_off] = acc;
+            out_asym_comp[idx] = acc;
         }
     });
 }
@@ -2476,23 +2450,6 @@ status_t jit_blk_reorder_t::pd_t::create(reorder_pd_t **reorder_pd,
     // TODO: Add tail processing support in blk_reorder
     if (prb.is_tail_present) return status::unimplemented;
 
-    DEBUG({
-        printf("init : ");
-        prb_dump(prb);
-    });
-    // Sort the prb array in increasing sizes of the output stride
-    prb_normalize(prb);
-    DEBUG({
-        printf("norm : ");
-        prb_dump(prb);
-    });
-    /* Combine the variables, which appear together on both
-             * sides of the reorder */
-    prb_simplify(prb);
-    DEBUG({
-        printf("smpl : ");
-        prb_dump(prb);
-    });
     prb_tile_normalize(prb);
     DEBUG({
         printf("tile : ");

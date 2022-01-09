@@ -147,23 +147,14 @@ struct ref_prelu_bwd_t : public gpu_primitive_t {
         CHECK(status);
 
         if (pd()->conf.reduce_diff_weights) {
-            status = pd()->reduction_pd_->create_primitive(
-                    reduction_p_, engine);
-            CHECK(status);
+            CHECK(create_nested_primitive(
+                    reduction_p_, pd()->reduction_pd_, engine));
         }
         return status::success;
     }
 
     status_t execute(const exec_ctx_t &ctx) const override {
         return execute_backward(ctx);
-    }
-
-protected:
-    primitive_list_t nested_primitives() const override {
-        if (pd()->conf.reduce_diff_weights) {
-            return {reduction_p_.get()};
-        } else
-            return {};
     }
 
 private:

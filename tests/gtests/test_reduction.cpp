@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2020 Intel Corporation
+* Copyright 2020-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -84,6 +84,7 @@ protected:
         test_fwd_pd_constructors<op_desc_t, pd_t>(
                 op_desc, pd, allowed_attributes);
 
+        EXPECT_ANY_THROW(reduction(pd, {}));
         // default primitive ctor
         auto prim = reduction();
         // regular primitive ctor
@@ -127,7 +128,11 @@ static auto expected_failures = []() {
             // not supported p
             reduction_test_params_t {tag::nchw, tag::nchw,
                     algorithm::reduction_norm_lp_max, 0.5f, 0.0f, {1, 8, 4, 4},
-                    {1, 8, 4, 4}, true, dnnl_invalid_arguments});
+                    {1, 8, 4, 4}, true, dnnl_invalid_arguments},
+            // invalid tag
+            reduction_test_params_t {tag::any, tag::nchw,
+                    algorithm::reduction_sum, 0.0f, 0.0f, {1, 1, 1, 4},
+                    {1, 1, 1, 1}, true, dnnl_invalid_arguments});
 };
 
 static auto zero_dim = []() {

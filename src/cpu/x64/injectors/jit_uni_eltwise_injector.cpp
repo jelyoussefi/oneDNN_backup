@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2019-2021 Intel Corporation
+* Copyright 2019-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -109,16 +109,18 @@ void jit_uni_eltwise_injector_f32<isa, Wmm>::injector_preamble(
     assert(preserved_gprs_count == aux_gprs_count());
 
     if (save_state_) {
-        h->push(p_table);
+        if (preserve_p_table_) h->push(p_table);
         for (size_t i = 0; i < preserved_gprs_count; ++i)
             h->push(Reg64(preserved_gpr_idxs[i]));
 
-        if (preserved_vecs_count) h->sub(h->rsp, preserved_vecs_count * vlen);
+        if (preserve_vmm_) {
+            if (preserved_vecs_count)
+                h->sub(h->rsp, preserved_vecs_count * vlen);
 
-        for (size_t i = 0; i < preserved_vecs_count; ++i)
-            h->uni_vmovups(
-                    h->ptr[h->rsp + i * vlen], Vmm(preserved_vec_idxs[i]));
-
+            for (size_t i = 0; i < preserved_vecs_count; ++i)
+                h->uni_vmovups(
+                        h->ptr[h->rsp + i * vlen], Vmm(preserved_vec_idxs[i]));
+        }
         load_table_addr();
     }
 
@@ -144,7 +146,7 @@ void jit_uni_eltwise_injector_f32<isa, Wmm>::injector_preamble_tail(
     for (size_t i = 0; i < tail_vecs_to_preserve; ++i)
         preserved_vec_idxs[idx_off + i] += tail_vecs_to_preserve;
 
-    if (save_state_) {
+    if (save_state_ && preserve_vmm_) {
         for (size_t i = 0; i < tail_vecs_to_preserve; ++i)
             h->uni_vmovups(h->ptr[h->rsp + i * vlen],
                     Vmm(preserved_vec_idxs[idx_off + i]));
@@ -160,14 +162,17 @@ void jit_uni_eltwise_injector_f32<isa, Wmm>::injector_postamble() {
     using namespace Xbyak::util;
     if (!save_state_) return;
 
-    for (size_t i = 0; i < preserved_vecs_count; ++i)
-        h->uni_vmovups(Vmm(preserved_vec_idxs[i]), h->ptr[h->rsp + i * vlen]);
+    if (preserve_vmm_) {
+        for (size_t i = 0; i < preserved_vecs_count; ++i)
+            h->uni_vmovups(
+                    Vmm(preserved_vec_idxs[i]), h->ptr[h->rsp + i * vlen]);
 
-    if (preserved_vecs_count) h->add(h->rsp, preserved_vecs_count * vlen);
+        if (preserved_vecs_count) h->add(h->rsp, preserved_vecs_count * vlen);
+    }
 
     for (int i = aux_gprs_count() - 1; i >= 0; --i)
         h->pop(Reg64(preserved_gpr_idxs[i]));
-    h->pop(p_table);
+    if (preserve_p_table_) h->pop(p_table);
 }
 
 template <cpu_isa_t isa, typename Wmm>
@@ -411,6 +416,7 @@ void jit_uni_eltwise_injector_f32<isa, Wmm>::tanh_compute_vector_fwd(
                 // needed for gather instruction
                 h->uni_vxorps(vmm_mask, vmm_mask, vmm_mask);
                 break;
+            case avx512_core_bf16:
             case avx512_common:
             case avx512_core: break;
             default: assert(!"unimplemented");
@@ -448,6 +454,7 @@ void jit_uni_eltwise_injector_f32<isa, Wmm>::tanh_compute_vector_fwd(
                 break;
             }
                 // use gather instruction
+            case avx512_core_bf16:
             case avx512_common:
             case avx512_core:
                 // we use vpermt2ps to not override the indices
@@ -1048,7 +1055,15 @@ void jit_uni_eltwise_injector_f32<isa, Wmm>::pow_compute_vector_fwd(
 
         // align stack on 16-byte as ABI requires
         h->mov(h->rbx, h->rsp);
+        // Get alignment offset.
         h->and_(h->rbx, 0xf);
+        // The 64-bit Windows ABI requires the caller to allocate 32 bytes of
+        // a so called "shadow space" for the callee. Since the return address
+        // is pushed on stack upon calling `powf` the `rsp` becomes 8-byte
+        // aligned. In order to allocate the shadow space and preserve the
+        // 16-byte alignment we have to allocate 40 bytes (32 bytes for the
+        // "shadow space" + 8 bytes to preserve 16-byte alignment).
+        h->add(h->rbx, 0x28);
         h->sub(h->rsp, h->rbx);
 
         // Take src, apply powf on it and replace value on a stack with dst.

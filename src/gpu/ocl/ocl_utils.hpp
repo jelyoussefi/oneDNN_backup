@@ -97,13 +97,13 @@ enum { OCL_BUFFER_ALIGNMENT = 128 };
 
 #define MAYBE_REPORT_ERROR(msg) \
     do { \
-        if (get_verbose()) printf("dnnl_verbose,gpu,error,%s\n", (msg)); \
+        if (get_verbose()) printf("onednn_verbose,gpu,error,%s\n", (msg)); \
     } while (0)
 
 #define MAYBE_REPORT_OCL_ERROR(s) \
     do { \
         if (dnnl::impl::get_verbose()) \
-            printf("dnnl_verbose,gpu,ocl_error,%d\n", (int)(s)); \
+            printf("onednn_verbose,gpu,ocl_error,%d\n", (int)(s)); \
     } while (0)
 
 #define OCL_CHECK_V(x) \
@@ -293,6 +293,8 @@ void dump_kernel_binary(
 
 status_t get_kernel_arg_types(cl_kernel ocl_kernel,
         std::vector<gpu::compute::scalar_type_t> *arg_types);
+
+status_t clone_kernel(cl_kernel kernel, cl_kernel *cloned_kernel);
 
 } // namespace ocl
 } // namespace gpu

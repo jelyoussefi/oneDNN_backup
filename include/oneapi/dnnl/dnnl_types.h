@@ -698,6 +698,21 @@ typedef enum {
     dnnl_BA4b8a16b4a,
     dnnl_aCB4c8b16c2b,
     dnnl_aCB4c8b16c4b,
+    dnnl_BA16a16b,
+    dnnl_BA16a32b,
+    dnnl_BA16a48b,
+    dnnl_BA16a64b,
+    dnnl_aCB16c2b,
+    dnnl_aCB16c4b,
+    dnnl_BA16b2a,
+    dnnl_BA16b4a,
+    dnnl_aBC16b16c,
+    dnnl_aBC16b32c,
+    dnnl_AB16a16b,
+    dnnl_AB16a32b,
+    dnnl_adbc,
+    dnnl_ABcde16a16b2a,
+    dnnl_aBCdef16b16c2b,
 
     /// Just a sentinel, not real memory format tag. Must be changed after new
     /// format tag is added.
@@ -992,6 +1007,7 @@ typedef enum {
     dnnl_IOdhw16i16o = dnnl_BAcde16b16a,
     dnnl_OIdhw4o8i8o4i = dnnl_ABcde4a8b8a4b,
     dnnl_IOdhw16o16i = dnnl_BAcde16a16b,
+    dnnl_OIdhw16o16i2o = dnnl_ABcde16a16b2a,
 
     // weights w/ groups, 3D
     dnnl_Goiw16g = dnnl_Abcd16a,
@@ -1092,6 +1108,7 @@ typedef enum {
     dnnl_gOIdhw2i8o4i = dnnl_aBCdef2c8b4c,
     dnnl_gOIdhw16i16o2i = dnnl_aBCdef16c16b2c,
     dnnl_gOIdhw16o16i = dnnl_aBCdef16b16c,
+    dnnl_gOIdhw16o16i2o = dnnl_aBCdef16b16c2b,
     dnnl_gOidhw16o = dnnl_aBcdef16b,
     dnnl_gOIdhw4i4o = dnnl_aBCdef4c4b,
     dnnl_gOIdhw4o4i = dnnl_aBCdef4b4c,
@@ -1567,7 +1584,7 @@ typedef enum {
     ///
     /// If specified:
     ///  - on forward propagation use scale and shift (aka scale and bias) for
-    ///    the batch normalization results
+    ///    the normalization results
     ///  - on backward propagation (for prop_kind == #dnnl_backward) compute
     ///    diff wrt scale and shift (hence one extra output used)
     ///
@@ -1592,7 +1609,7 @@ typedef enum {
     /// Use scale parameter
     ///
     /// If specified:
-    ///  - on forward propagation use scale for the batch normalization results
+    ///  - on forward propagation use scale for the normalization results
     ///  - on backward propagation (for prop_kind == #dnnl_backward) compute
     ///    diff wrt scale (hence one extra output used)
     dnnl_use_scale = 0x8U,
@@ -1600,8 +1617,8 @@ typedef enum {
     /// Use shift parameter
     ///
     /// If specified:
-    ///  - on forward propagation use shift (aka bias) for the batch
-    ///    normalization results
+    ///  - on forward propagation use shift (aka bias) for the normalization
+    ///    results
     ///  - on backward propagation (for prop_kind == #dnnl_backward) compute
     ///    diff wrt shift (hence one extra output used)
     dnnl_use_shift = 0x10U,
@@ -2844,6 +2861,7 @@ typedef struct {
 /// dnnl_query_*_md                 | const #dnnl_memory_desc_t **
 /// dnnl_query_*_\<op\>_d           | const dnnl_\<op\>_desc_t **
 /// dnnl_query_*_pd                 | #const_dnnl_primitive_desc_t *
+/// dnnl_query_cache_blob_id        | const uint8_t **
 ///
 /// @note
 ///     Rule of thumb: all opaque types and structures are returned by
@@ -2879,6 +2897,9 @@ typedef enum {
     dnnl_query_reorder_dst_engine, ///< destination engine
 
     dnnl_query_prop_kind, ///< propagation kind
+
+    dnnl_query_cache_blob_id_size_s64, ///< size of cache blob ID in bytes
+    dnnl_query_cache_blob_id, ///< cache blob  ID (pointer to array)
 
     // memory and op descriptor section
     dnnl_query_some_d = 64, ///< stub
@@ -3042,7 +3063,6 @@ typedef enum {
 
     /// Intel AVX-512, Intel DL Boost and bfloat16 support and
     /// Intel AMX with 8-bit integer and bfloat16 support
-    /// (initial support)
     dnnl_cpu_isa_avx512_core_amx = 0x3e7,
 
     /// Intel AVX2 and Intel Deep Learning Boost (Intel DL Boost) support

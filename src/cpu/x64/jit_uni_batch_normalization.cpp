@@ -121,8 +121,8 @@ struct jit_bnorm_t : public jit_generator {
 
     // Relu section
     bool with_relu, with_relu_inf_only;
-    Vmm vzero; // is_fwd() ? vdiff_beta : vbeta
     Reg64 reg_ws = reg_roff;
+    Reg64 reg_tmp_alpha = reg_diff_scale; // required in sse41
     Label l_relu_mask_avx2;
     Opmask kstore_mask = Opmask(1);
 
@@ -150,6 +150,10 @@ struct jit_bnorm_t : public jit_generator {
     Vmm veps = Vmm(isa == avx512_common ? 28 : 13);
     Vmm vchan_size = Vmm(isa == avx512_common ? 29 : 14);
     Vmm vtail_mask = Vmm(isa == avx512_common ? 30 : 15);
+    Vmm vaux = Vmm(isa == avx512_common ? 31 : 5);
+    Vmm vdst_aux = vdiff_gamma; // used for ReLU in AVX2 & sse41
+    Vmm vmask = Vmm(0);
+    Vmm vzero; // is_fwd() ? vdiff_beta : vbeta
 
     size_t t0_pf_offt;
     size_t t1_pf_offt;
@@ -177,7 +181,8 @@ struct jit_bnorm_t : public jit_generator {
         stack_off_shift = 112,
         stack_off_diff_shift = 120,
         stack_off_soff_max = 128,
-        stack_size_required = 136,
+        stack_off_relu_alpha = 136,
+        stack_size_required = 144,
     };
 
     int bit_shift() { return 5 - is_bf16_; }
@@ -266,6 +271,10 @@ struct jit_bnorm_t : public jit_generator {
             mov(reg_tmp, ptr[reg_param + PARAM_OFF(var)]);
             mov(reg_var, reg_tmp);
         }
+        if (with_relu_inf_only && bdesc_->alpha() != 0.f) {
+            mov(reg_tmp, float2int(bdesc_->alpha()));
+            mov(ptr[rsp + stack_off_relu_alpha], reg_tmp);
+        }
 #undef PARAM_OFF
     }
 
@@ -294,7 +303,8 @@ struct jit_bnorm_t : public jit_generator {
 
     void prepare_relu() {
         with_relu = bdesc_->is_fwd()
-                ? bdesc_->with_relu_post_op() || bdesc_->fuse_norm_relu()
+                ? bdesc_->with_relu_post_op(bdesc_->is_training())
+                        || bdesc_->fuse_norm_relu()
                 : bdesc_->fuse_norm_relu();
         with_relu_inf_only = with_relu && bdesc_->is_fwd()
                 && !(bdesc_->fuse_norm_relu() && bdesc_->is_training());
@@ -335,6 +345,42 @@ struct jit_bnorm_t : public jit_generator {
                 kstore_mask);
         vblendmps(vdst | kstore_mask, vzero, vdst);
         shl(is_nspc_ ? reg_soff_nspc : reg_soff, bit_shift());
+    }
+
+    void fwd_process_relu_alpha(Vmm vmm_dst) {
+        if (isa == avx512_common)
+            fwd_process_relu_alpha_avx512_common(vmm_dst);
+        else {
+            assert(utils::one_of(isa, avx2, sse41));
+            if (vmm_dst.getIdx() == 0) {
+                uni_vmovups(vdst_aux, vmm_dst);
+                fwd_process_relu_alpha_avx2(vdst_aux);
+                uni_vmovups(Vmm(0), vdst_aux);
+            } else
+                fwd_process_relu_alpha_avx2(vmm_dst);
+        }
+    }
+    void fwd_process_relu_alpha_avx512_common(Vmm vmm_dst) {
+        const Xmm xmm_aux = Xmm(vaux.getIdx());
+        vmovq(xmm_aux, ptr[rsp + stack_off_relu_alpha]);
+        vbroadcastss(vaux, xmm_aux);
+        vcmpps(kstore_mask, vzero, vmm_dst, _cmp_lt_os);
+        vmulps(vaux, vmm_dst, vaux);
+        vblendmps(vmm_dst | kstore_mask, vaux, vmm_dst);
+    }
+
+    void fwd_process_relu_alpha_avx2(Vmm vmm_dst) {
+        const Xmm xmm_aux = Xmm(vaux.getIdx());
+        uni_vpxor(vmask, vmask, vmask);
+        if (isa == sse41) {
+            mov(reg_tmp_alpha, ptr[rsp + stack_off_relu_alpha]);
+            uni_vmovq(xmm_aux, reg_tmp_alpha);
+        } else
+            vmovq(xmm_aux, ptr[rsp + stack_off_relu_alpha]);
+        uni_vbroadcastss(vaux, xmm_aux);
+        uni_vcmpps(vmask, vmm_dst, vzero, _cmp_lt_os);
+        uni_vmulps(vaux, vaux, vmm_dst);
+        uni_vblendvps(vmm_dst, vmm_dst, vaux, vmask);
     }
 
     void bwd_process_relu_avx2(Vmm vdiff_dst, int offt, Vmm vstore_mask) {
@@ -675,7 +721,10 @@ struct jit_bnorm_t : public jit_generator {
                     }
 
                     if (with_relu_inf_only) { // --attr=post_ops='relu'
-                        uni_vmaxps(Vmm(idx), Vmm(idx), vzero);
+                        if (bdesc_->alpha() != 0.f)
+                            fwd_process_relu_alpha(Vmm(idx));
+                        else
+                            uni_vmaxps(Vmm(idx), Vmm(idx), vzero);
                     } else if (with_relu) { // --flags=R
                         fwd_process_relu_avx512_common(Vmm(idx));
                     }
@@ -1010,9 +1059,12 @@ struct jit_bnorm_t : public jit_generator {
                 } else {
                     uni_vmulps(v, v, vsqrtvar);
                 }
-                if (with_relu_inf_only) {
-                    uni_vmaxps(v, v, vzero);
-                } else if (with_relu) {
+                if (with_relu_inf_only) { // --attr=post_ops='relu'
+                    if (bdesc_->alpha() != 0.f) {
+                        fwd_process_relu_alpha(v);
+                    } else
+                        uni_vmaxps(v, v, vzero);
+                } else if (with_relu) { // --flags=R
                     if (isa == avx512_common)
                         fwd_process_relu_avx512_common(v, offt);
                     else
@@ -1754,9 +1806,11 @@ struct jit_bnorm_t : public jit_generator {
             prepare_tail_mask_avx2_common();
 
         compute_static_strides();
+
+        prepare_relu();
+
         sub(rsp, stack_size_required);
         load_common_params();
-        prepare_relu();
 
         if (bdesc_->is_fwd()) {
             if (!bdesc_->stats_is_src()) { compute_mean_variance(); }
@@ -1777,7 +1831,7 @@ namespace bnorm_impl {
 
 template <cpu_isa_t isa>
 struct driver_t : public c_compatible {
-    driver_t(const batch_normalization_pd_t *bdesc)
+    driver_t(const batch_normalization_pd_t *bdesc, int nthr)
         : bdesc_(bdesc), ker_(bdesc_) {
         const dim_t C_PADDED = get_c_padded(bdesc_);
 
@@ -1788,8 +1842,7 @@ struct driver_t : public c_compatible {
         dt_size_ = types::data_type_size(bdesc_->desc()->data_desc.data_type);
         size_t data_size = dt_size_ * bdesc_->MB() * C_PADDED * bdesc_->D()
                 * bdesc_->H() * bdesc_->W();
-        l3_size_ = platform::get_per_core_cache_size(3) * dnnl_get_max_threads()
-                / 2; // XXX
+        l3_size_ = platform::get_per_core_cache_size(3) * nthr / 2; // XXX
         // TODO: cache balancing for nspc
         do_blocking_ = is_nspc_ ? false
                                 : (data_size >= l3_size_ / 2 && l3_size_ > 0);
@@ -1798,14 +1851,13 @@ struct driver_t : public c_compatible {
     ~driver_t() = default;
 
     static void init_scratchpad(memory_tracking::registrar_t &scratchpad,
-            const batch_normalization_pd_t *bdesc) {
+            const batch_normalization_pd_t *bdesc, int nthr) {
         dim_t C_PADDED = get_c_padded(bdesc);
 
         int sbuf_sz = use_tmp_stats(bdesc) * 2 * C_PADDED;
         int pbuf_sz = (use_tmp_diff_scale(bdesc) + use_tmp_diff_shift(bdesc))
                 * C_PADDED;
-        int rbuf_sz
-                = (bdesc->is_fwd() ? 1 : 2) * C_PADDED * dnnl_get_max_threads();
+        int rbuf_sz = (bdesc->is_fwd() ? 1 : 2) * C_PADDED * nthr;
 
         scratchpad.book<acc_data_t>(key_bnorm_tmp_stats, sbuf_sz);
         scratchpad.book<acc_data_t>(key_bnorm_tmp_diff_ss, pbuf_sz);
@@ -2022,7 +2074,8 @@ status_t jit_uni_batch_normalization_fwd_t<isa>::pd_t::init(engine_t *engine) {
             && one_of(src_md()->data_type, f32, bf16)
             && IMPLICATION(src_md()->data_type == bf16, mayiuse(avx512_core))
             && check_scale_shift_data_type()
-            && (attr()->has_default_values() || this->with_relu_post_op());
+            && (attr()->has_default_values()
+                    || this->with_relu_post_op(is_training()));
     if (!ok) return status::unimplemented;
 
     const memory_desc_wrapper src_d(src_md());
@@ -2050,8 +2103,9 @@ status_t jit_uni_batch_normalization_fwd_t<isa>::pd_t::init(engine_t *engine) {
         return status::unimplemented;
     }
 
+    nthr_ = dnnl_get_max_threads();
     auto scratchpad = scratchpad_registry().registrar();
-    bnorm_impl::driver_t<isa>::init_scratchpad(scratchpad, this);
+    bnorm_impl::driver_t<isa>::init_scratchpad(scratchpad, this, nthr_);
 
     return status::success;
 }
@@ -2063,7 +2117,8 @@ jit_uni_batch_normalization_fwd_t<isa>::jit_uni_batch_normalization_fwd_t(
 
 template <cpu_isa_t isa>
 status_t jit_uni_batch_normalization_fwd_t<isa>::init(engine_t *engine) {
-    CHECK(safe_ptr_assign(bnorm_driver_, new bnorm_impl::driver_t<isa>(pd())));
+    CHECK(safe_ptr_assign(
+            bnorm_driver_, new bnorm_impl::driver_t<isa>(pd(), pd()->nthr_)));
     return bnorm_driver_->create_kernel();
 }
 
@@ -2101,8 +2156,9 @@ status_t jit_uni_batch_normalization_fwd_t<isa>::execute(
     auto scratchpad = ctx.get_scratchpad_grantor();
 
     bnorm_driver_->init_barriers(scratchpad);
+    const int nthr = pd()->nthr_;
 
-    parallel(0, [&](const int ithr, const int nthr) {
+    parallel(nthr, [&](const int ithr, const int nthr) {
         bnorm_driver_->exec(ithr, nthr, src, nullptr, dst, nullptr, scale,
                 nullptr, shift, nullptr, mean, var, ws, scratchpad);
     });
@@ -2167,8 +2223,9 @@ status_t jit_uni_batch_normalization_bwd_t<isa>::pd_t::init(engine_t *engine) {
 
     /* TODO: extra checks required */
 
+    nthr_ = dnnl_get_max_threads();
     auto scratchpad = scratchpad_registry().registrar();
-    bnorm_impl::driver_t<isa>::init_scratchpad(scratchpad, this);
+    bnorm_impl::driver_t<isa>::init_scratchpad(scratchpad, this, nthr_);
 
     return status::success;
 }
@@ -2180,7 +2237,8 @@ jit_uni_batch_normalization_bwd_t<isa>::jit_uni_batch_normalization_bwd_t(
 
 template <cpu_isa_t isa>
 status_t jit_uni_batch_normalization_bwd_t<isa>::init(engine_t *engine) {
-    CHECK(safe_ptr_assign(bnorm_driver_, new bnorm_impl::driver_t<isa>(pd())));
+    CHECK(safe_ptr_assign(
+            bnorm_driver_, new bnorm_impl::driver_t<isa>(pd(), pd()->nthr_)));
     return bnorm_driver_->create_kernel();
 }
 
@@ -2213,8 +2271,9 @@ status_t jit_uni_batch_normalization_bwd_t<isa>::execute(
     auto scratchpad = ctx.get_scratchpad_grantor();
 
     bnorm_driver_->init_barriers(scratchpad);
+    const int nthr = pd()->nthr_;
 
-    parallel(0, [&](const int ithr, const int nthr) {
+    parallel(nthr, [&](const int ithr, const int nthr) {
         bnorm_driver_->exec(ithr, nthr, src, diff_src, nullptr, diff_dst, scale,
                 diff_scale, nullptr, diff_shift, mean, var, ws, scratchpad);
     });

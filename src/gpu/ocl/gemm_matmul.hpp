@@ -104,16 +104,10 @@ struct gemm_matmul_t : public gpu_primitive_t {
     };
 
     status_t init(engine_t *engine) override {
-        status_t gemm_status = pd()->gemm_pd_->create_primitive(gemm_, engine);
-        return gemm_status;
+        return create_nested_primitive(gemm_, pd()->gemm_pd_, engine);
     }
 
     status_t execute(const exec_ctx_t &ctx) const override;
-
-protected:
-    primitive_list_t nested_primitives() const override {
-        return {gemm_.get()};
-    }
 
 private:
     const pd_t *pd() const { return (const pd_t *)primitive_t::pd().get(); }

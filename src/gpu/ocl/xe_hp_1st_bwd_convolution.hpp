@@ -107,10 +107,12 @@ struct xe_hp_1st_convolution_bwd_weights_t : public gpu_primitive_t {
         kernel_name = "xe_hp_1st_conv_bwd_weights";
 
         if (pd()->conf.reorder_wei) {
-            CHECK(pd()->rpd_wei_->create_primitive(wei_reorder_, engine));
+            CHECK(create_nested_primitive(
+                    wei_reorder_, pd()->rpd_wei_, engine));
         }
         if (pd()->conf.reorder_bias) {
-            CHECK(pd()->rpd_bia_->create_primitive(bia_reorder_, engine));
+            CHECK(create_nested_primitive(
+                    bia_reorder_, pd()->rpd_bia_, engine));
         }
         compute::kernel_ctx_t kernel_ctx;
         status_t status = pd()->init_kernel_ctx(kernel_ctx);
@@ -119,16 +121,6 @@ struct xe_hp_1st_convolution_bwd_weights_t : public gpu_primitive_t {
         create_kernel(engine, &kernel_, kernel_name, kernel_ctx);
         if (!kernel_) return status::runtime_error;
         return status::success;
-    }
-
-    primitive_list_t nested_primitives() const override {
-        primitive_list_t prim_list;
-        if (pd()->conf.reorder_wei)
-            prim_list.emplace(prim_list.begin(), wei_reorder_.get());
-        if (pd()->conf.reorder_bias)
-            prim_list.emplace(prim_list.begin(), bia_reorder_.get());
-
-        return prim_list;
     }
 
     status_t execute(const exec_ctx_t &ctx) const override {

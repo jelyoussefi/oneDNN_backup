@@ -18,6 +18,7 @@
 #define GPU_OCL_OCL_GPU_KERNEL_HPP
 
 #include <assert.h>
+#include <atomic>
 #include <string>
 #include <CL/cl.h>
 
@@ -32,12 +33,13 @@ namespace ocl {
 class ocl_gpu_kernel_t : public compute::kernel_impl_t {
 public:
     ocl_gpu_kernel_t(const std::shared_ptr<compute::binary_t> &binary,
-            const std::string &binary_name,
+            const std::string &kernel_name,
             const std::vector<gpu::compute::scalar_type_t> &arg_types)
         : state_(state_t::binary)
         , ocl_kernel_(nullptr)
         , binary_(binary)
-        , binary_name_(binary_name)
+        , binary_size_(binary->size())
+        , kernel_name_(kernel_name)
         , arg_types_(arg_types) {
         MAYBE_UNUSED(state_);
     }
@@ -50,20 +52,22 @@ public:
     }
 
     status_t parallel_for(stream_t &stream, const compute::nd_range_t &range,
-            const compute::kernel_arg_list_t &arg_list) const override;
+            const compute::kernel_arg_list_t &arg_list) override;
 
     status_t realize(compute::kernel_t *kernel, const engine_t *engine,
             compute::program_list_t *programs) const override;
 
     const char *name() const {
         assert(state_ == state_t::binary);
-        return binary_name_.c_str();
+        return kernel_name_.c_str();
     }
 
-    const std::shared_ptr<compute::binary_t> &binary() const {
+    const std::shared_ptr<compute::binary_t> &binary() const override {
         assert(state_ == state_t::binary);
         return binary_;
     }
+
+    status_t binary(engine_t *engine, compute::binary_t &binary) const override;
 
     const std::vector<gpu::compute::scalar_type_t> &arg_types() const {
         return arg_types_;
@@ -72,9 +76,15 @@ public:
     void clear() override {
         assert(state_ == state_t::binary);
         binary_->clear();
-        binary_name_.clear();
+        kernel_name_.clear();
         arg_types_.clear();
     }
+
+    status_t binary_size(size_t *binary_size) const override {
+        (*binary_size) = binary_size_;
+        return status::success;
+    }
+
     enum class state_t { binary, kernel };
 
 protected:
@@ -89,9 +99,16 @@ protected:
     state_t state_;
     cl_kernel ocl_kernel_;
     std::shared_ptr<compute::binary_t> binary_;
-    std::string binary_name_;
+    // When DNNL_USE_RT_OBJECTS_IN_PRIMITIVE_CACHE is defined the binary_ is
+    // cleared via `clear()` to reduce memory footprint. Because of that the
+    // binary size is stored separately to avoid querying it.
+    size_t binary_size_;
+    std::string kernel_name_;
 
     std::vector<gpu::compute::scalar_type_t> arg_types_;
+
+    // Used to protect cl_kernel before enqueueing to set arguments.
+    std::atomic<bool> is_locked_ {false};
 };
 
 } // namespace ocl

@@ -29,12 +29,13 @@ namespace itt {
 static setting_t<int> itt_task_level {__itt_task_level_high};
 
 bool get_itt(__itt_task_level level) {
-    // Assumes that all threads see the same environment
-    const int len = 2;
-    char val[len] = {2};
-    static int get_itt_task_level = getenv("DNNL_ITT_TASK_LEVEL", val, len);
-    if (get_itt_task_level == 1) itt_task_level.set(atoi(val), true);
-    return (level <= itt_task_level.get()) ? true : false;
+    if (!itt_task_level.initialized()) {
+        // Assumes that all threads see the same environment
+        static int val
+                = getenv_int_user("ITT_TASK_LEVEL", itt_task_level.get());
+        itt_task_level.set(val);
+    }
+    return level <= itt_task_level.get();
 }
 
 #if defined(DNNL_ENABLE_ITT_TASKS)

@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2020 Intel Corporation
+* Copyright 2020-2021 Intel Corporation
 * Copyright 2020 Codeplay Software Limited
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
@@ -32,20 +32,19 @@ status_t cudnn_eltwise_fwd_t::execute(const exec_ctx_t &ctx) const {
     nvidia::sycl_cuda_stream_t *cuda_stream
             = utils::downcast<nvidia::sycl_cuda_stream_t *>(ctx.stream());
 
-    return cuda_stream->interop_task([&](cl::sycl::handler &cgh) {
-       
+    return cuda_stream->interop_task([&](::sycl::handler &cgh) {
         auto src_acc = CTX_IN_ACCESSOR(DNNL_ARG_SRC);
         auto dst_acc = CTX_OUT_ACCESSOR(DNNL_ARG_DST);
-        cgh.host_task([=](const cl::sycl::interop_handle &ih) {
-        
-	    std::vector<void *> args;
+
+        compat::host_task(cgh, [=](const compat::interop_handle &ih) {
+            std::vector<void *> args;
             auto &sycl_engine = *utils::downcast<sycl_cuda_engine_t *>(
                     cuda_stream->engine());
             auto sc = cuda_sycl_scoped_context_handler_t(sycl_engine);
             auto handle = cuda_stream->get_cudnn_handle();
 
-            args.push_back(CTX_IN_MEM_PTR(DNNL_ARG_SRC, src_acc));
-            args.push_back(CTX_OUT_MEM_PTR(DNNL_ARG_DST, dst_acc));
+            args.push_back(sc.memory<void *>(ih, src_acc));
+            args.push_back(sc.memory<void *>(ih, dst_acc));
 
             pd()->eltwise_fwd_impl_->execute(handle, args.data(), args.size());
         });
@@ -56,16 +55,15 @@ status_t cudnn_eltwise_bwd_t::execute(const exec_ctx_t &ctx) const {
     if (memory_desc_wrapper(pd()->src_md()).has_zero_dim())
         return status::success;
 
- 
     nvidia::sycl_cuda_stream_t *cuda_stream
             = utils::downcast<nvidia::sycl_cuda_stream_t *>(ctx.stream());
 
-    return cuda_stream->interop_task([&](cl::sycl::handler &cgh) {
+    return cuda_stream->interop_task([&](::sycl::handler &cgh) {
         auto src_acc = CTX_IN_ACCESSOR(DNNL_ARG_SRC);
         auto diff_dst_acc = CTX_IN_ACCESSOR(DNNL_ARG_DIFF_DST);
         auto diff_src_acc = CTX_OUT_ACCESSOR(DNNL_ARG_DIFF_SRC);
 
-        cgh.host_task([=](const cl::sycl::interop_handle &ih) {
+        compat::host_task(cgh, [=](const compat::interop_handle &ih) {
             std::vector<void *> args;
             auto &sycl_engine = *utils::downcast<sycl_cuda_engine_t *>(
                     cuda_stream->engine());

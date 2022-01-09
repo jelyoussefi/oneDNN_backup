@@ -31,9 +31,9 @@ status_t cudnn_convolution_fwd_t::execute_convolution(
             = utils::downcast<nvidia::sycl_cuda_stream_t *>(ctx.stream());
 
     return cuda_stream->interop_task([&](cl::sycl::handler &cgh) {
-        using read_acc_t = cl::sycl::accessor<uint8_t, 1, cl::sycl::access::mode::read>;
-        using write_acc_t = cl::sycl::accessor<uint8_t, 1, cl::sycl::access::mode::write>;
-        using scratch_acc_t = cl::sycl::accessor<uint8_t, 1, cl::sycl::access::mode::read_write>;
+        using read_acc_t = ::sycl::accessor<uint8_t, 1, ::sycl::access::mode::read>;
+        using write_acc_t = ::sycl::accessor<uint8_t, 1, ::sycl::access::mode::write>;
+        using scratch_acc_t = ::sycl::accessor<uint8_t, 1, ::sycl::access::mode::read_write>;
        
         std::shared_ptr<read_acc_t> x_acc;
         std::shared_ptr<read_acc_t> weights_acc;
@@ -66,7 +66,7 @@ status_t cudnn_convolution_fwd_t::execute_convolution(
                                                     key_conv_cudnn_algo)
                                     .get())
                             ->buffer()
-                            .get_access<cl::sycl::access::mode::read_write>(
+                            .get_access<::sycl::access::mode::read_write>(
                                     cgh));
         }
         if (with_bias && !CTX_IN_IS_USM(DNNL_ARG_BIAS)) {
@@ -82,15 +82,15 @@ status_t cudnn_convolution_fwd_t::execute_convolution(
         if (use_temp_dst) {
             temp_dst_acc = std::make_shared<scratch_acc_t>(
                     buffer(scratch_storage.get())
-                            .get_access<cl::sycl::access::mode::read_write>(
+                            .get_access<::sycl::access::mode::read_write>(
                                     cgh));
             temp_reorder_acc = std::make_shared<scratch_acc_t>(
                     buffer(scratch_storage_2.get())
-                            .get_access<cl::sycl::access::mode::read_write>(
+                            .get_access<::sycl::access::mode::read_write>(
                                     cgh));
         }
 
-        cgh.host_task([=](const cl::sycl::interop_handle  &ih) {
+        compat::host_task(cgh, [=](const compat::interop_handle &ih) {
             auto &sycl_engine = *utils::downcast<sycl_cuda_engine_t *>(
                     cuda_stream->engine());
             auto sc = cuda_sycl_scoped_context_handler_t(sycl_engine);
@@ -122,14 +122,14 @@ status_t cudnn_convolution_bwd_data_t::execute_convolution(
     nvidia::sycl_cuda_stream_t *cuda_stream
             = utils::downcast<nvidia::sycl_cuda_stream_t *>(ctx.stream());
 
-    return cuda_stream->interop_task([&](cl::sycl::handler &cgh) {
-        using scratch_acc_t = cl::sycl::accessor<uint8_t, 1,
-                cl::sycl::access::mode::read_write>;
+    return cuda_stream->interop_task([&](::sycl::handler &cgh) {
+        using scratch_acc_t = ::sycl::accessor<uint8_t, 1,
+                ::sycl::access::mode::read_write>;
         auto x_acc = CTX_OUT_ACCESSOR(DNNL_ARG_DIFF_SRC);
         auto weights_acc = CTX_IN_ACCESSOR(DNNL_ARG_WEIGHTS);
         auto y_acc = CTX_IN_ACCESSOR(DNNL_ARG_DIFF_DST);
         std::shared_ptr<
-                cl::sycl::accessor<uint8_t, 1, cl::sycl::access::mode::read>>
+                ::sycl::accessor<uint8_t, 1, ::sycl::access::mode::read>>
                 bias_acc;
         std::shared_ptr<scratch_acc_t> scratch_acc;
         std::shared_ptr<scratch_acc_t> filter_scratch_acc;
@@ -141,12 +141,11 @@ status_t cudnn_convolution_bwd_data_t::execute_convolution(
                                                     key_conv_cudnn_algo)
                                     .get())
                             ->buffer()
-                            .get_access<cl::sycl::access::mode::read_write>(
-                                    cgh));
+                            .get_access<::sycl::access::mode::read_write>(cgh));
         }
         if (with_bias) {
-            bias_acc = std::make_shared<cl::sycl::accessor<uint8_t, 1,
-                    cl::sycl::access::mode::read>>(
+            bias_acc = std::make_shared<
+                    ::sycl::accessor<uint8_t, 1, ::sycl::access::mode::read>>(
                     CTX_IN_ACCESSOR(DNNL_ARG_BIAS));
         }
         if (pd()->impl_->using_transformed_filter()) {
@@ -154,7 +153,7 @@ status_t cudnn_convolution_bwd_data_t::execute_convolution(
                     = std::make_shared<scratch_acc_t>(CTX_SCRATCH_ACCESSOR(
                             memory_tracking::names::key_conv_cudnn_filter));
         }
-        cgh.host_task([=](const cl::sycl::interop_handle &ih) {
+        compat::host_task(cgh, [=](const compat::interop_handle &ih) {
             auto &sycl_engine = *utils::downcast<sycl_cuda_engine_t *>(
                     cuda_stream->engine());
             auto sc = cuda_sycl_scoped_context_handler_t(sycl_engine);
@@ -180,17 +179,17 @@ status_t cudnn_convolution_bwd_weights_t::execute_zero_dims(
     nvidia::sycl_cuda_stream_t *cuda_stream
             = utils::downcast<nvidia::sycl_cuda_stream_t *>(ctx.stream());
 
-    return cuda_stream->interop_task([&](cl::sycl::handler &cgh) {
+    return cuda_stream->interop_task([&](::sycl::handler &cgh) {
         auto weights_acc = CTX_OUT_ACCESSOR(DNNL_ARG_DIFF_WEIGHTS);
         std::shared_ptr<
-                cl::sycl::accessor<uint8_t, 1, cl::sycl::access::mode::write>>
+                ::sycl::accessor<uint8_t, 1, ::sycl::access::mode::write>>
                 bias_acc;
         if (pd()->with_bias()) {
-            bias_acc = std::make_shared<cl::sycl::accessor<uint8_t, 1,
-                    cl::sycl::access::mode::write>>(
+            bias_acc = std::make_shared<
+                    ::sycl::accessor<uint8_t, 1, ::sycl::access::mode::write>>(
                     CTX_OUT_ACCESSOR(DNNL_ARG_DIFF_BIAS));
         }
-        cgh.host_task([=](const cl::sycl::interop_handle &ih) {
+        compat::host_task(cgh, [=](const compat::interop_handle &ih) {
             auto &sycl_engine = *utils::downcast<sycl_cuda_engine_t *>(
                     cuda_stream->engine());
             auto sc = cuda_sycl_scoped_context_handler_t(sycl_engine);
@@ -208,14 +207,14 @@ status_t cudnn_convolution_bwd_weights_t::execute_convolution(
     nvidia::sycl_cuda_stream_t *cuda_stream
             = utils::downcast<nvidia::sycl_cuda_stream_t *>(ctx.stream());
 
-    return cuda_stream->interop_task([&](cl::sycl::handler &cgh) {
-        using scratch_acc_t = cl::sycl::accessor<uint8_t, 1,
-                cl::sycl::access::mode::read_write>;
+    return cuda_stream->interop_task([&](::sycl::handler &cgh) {
+        using scratch_acc_t = ::sycl::accessor<uint8_t, 1,
+                ::sycl::access::mode::read_write>;
         auto x_acc = CTX_IN_ACCESSOR(DNNL_ARG_SRC);
         auto weights_acc = CTX_OUT_ACCESSOR(DNNL_ARG_DIFF_WEIGHTS);
         auto y_acc = CTX_IN_ACCESSOR(DNNL_ARG_DIFF_DST);
         std::shared_ptr<
-                cl::sycl::accessor<uint8_t, 1, cl::sycl::access::mode::write>>
+                ::sycl::accessor<uint8_t, 1, ::sycl::access::mode::write>>
                 bias_acc;
         std::shared_ptr<scratch_acc_t> scratch_acc;
         std::shared_ptr<scratch_acc_t> filter_scratch_acc;
@@ -227,12 +226,11 @@ status_t cudnn_convolution_bwd_weights_t::execute_convolution(
                                                     key_conv_cudnn_algo)
                                     .get())
                             ->buffer()
-                            .get_access<cl::sycl::access::mode::read_write>(
-                                    cgh));
+                            .get_access<::sycl::access::mode::read_write>(cgh));
         }
         if (with_bias) {
-            bias_acc = std::make_shared<cl::sycl::accessor<uint8_t, 1,
-                    cl::sycl::access::mode::write>>(
+            bias_acc = std::make_shared<
+                    ::sycl::accessor<uint8_t, 1, ::sycl::access::mode::write>>(
                     CTX_OUT_ACCESSOR(DNNL_ARG_DIFF_BIAS));
         }
         if (pd()->impl_->using_transformed_filter()) {
@@ -241,7 +239,7 @@ status_t cudnn_convolution_bwd_weights_t::execute_convolution(
                             memory_tracking::names::key_conv_cudnn_filter));
         }
 
-        cgh.host_task([=](const cl::sycl::interop_handle &ih) {
+        compat::host_task(cgh, [=](const compat::interop_handle &ih) {
             auto &sycl_engine = *utils::downcast<sycl_cuda_engine_t *>(
                     cuda_stream->engine());
             auto sc = cuda_sycl_scoped_context_handler_t(sycl_engine);

@@ -9,26 +9,26 @@ Linux perf.
 
 ## Build-Time Controls
 
-At build-time, support for this feature is controlled via cmake option
-`DNNL_ENABLE_JIT_PROFILING`.
+At build-time, support for this feature is controlled by the CMake option
+`ONEDNN_ENABLE_JIT_PROFILING`.
 
-| CMake Option                | Supported values (defaults in bold) | Description
-| :---                        | :---                                | :---
-| DNNL_ENABLE_JIT_PROFILING   | **ON**, OFF                         | Enables performance profilers integration
+| CMake Option                | Supported Values      | Description                               |
+| :---                        | :---                  | :---                                      |
+| ONEDNN_ENABLE_JIT_PROFILING | **ON** (default), OFF | Enables performance profilers integration |
 
 ## Run-Time Controls
 
-When the feature is enabled at build-time, the `DNNL_JIT_PROFILE` environment
+When the feature is enabled at build-time, the `ONEDNN_JIT_PROFILE` environment
 variable can be used to manage integration with performance profilers.
 
-| Environment variable | Value            | Description                                                            | x64            | AArch64
-| :---                 | :---             | :---                                                                   | :---           | :---
-| DNNL_JIT_PROFILE     | 1                | Enables VTune Amplifier integration                                    | **x(default)** | N/A
-|                      | 2                | Enables basic Linux perf integration                                   | x              | **x(default)**
-|                      | 6                | Enables Linux perf integration with JIT dump output                    | x              | x
-|                      | 14               | Enables Linux perf integration with JIT dump output and TSC timestamps | x              | N/A
+| Environment Variable | Value            | Description                                                            | x64             | AArch64
+| :---                 | :---             | :---                                                                   | :---            | :---
+| ONEDNN_JIT_PROFILE   | 1                | Enables VTune Amplifier integration                                    | **x** (default) | N/A
+| ^                    | 2                | Enables basic Linux perf integration                                   | x               | **x** (default)
+| ^                    | 6                | Enables Linux perf integration with JIT dump output                    | x               | x
+| ^                    | 14               | Enables Linux perf integration with JIT dump output and TSC timestamps | x               | N/A
 
-Other valid values for `DNNL_JIT_PROFILE` include integer values representing
+Other valid values for `ONEDNN_JIT_PROFILE` include integer values representing
 a combination of flags accepted by the @ref dnnl_set_jit_profiling_flags
 function.
 
@@ -60,30 +60,30 @@ potential performance issues.
 
 ##### Build-Time Controls
 
-At build-time, support for this feature is controlled via cmake option
-`DNNL_ENABLE_JIT_PROFILING`.
+At build-time, support for this feature is controlled by the CMake option
+`ONEDNN_ENABLE_ITT_TASKS`.
 
-| CMake Option                | Supported values (defaults in bold) | Description
-| :---                        | :---                                | :---
-| DNNL_ENABLE_ITT_TASKS       | **ON**, OFF                         | Enables ITT tagging for primitive execution
+| CMake Option                | Supported Values      | Description
+| :---                        | :---                  | :---
+| ONEDNN_ENABLE_ITT_TASKS     | **ON** (default), OFF | Enables ITT tagging for primitive execution
 
 ##### Run-Time Controls
 
-When the feature is enabled at build-time, the `DNNL_ITT_TASK_LEVEL` environment
+When the feature is enabled at build-time, the `ONEDNN_ITT_TASK_LEVEL` environment
 variable can be used to enable different level of ITT tagging.
 
-| Environment variable | Value        | Description
-| :---                 | :---         | :---
-| DNNL_ITT_TASK_LEVEL  | 0            | no ITT event will be triggered
-|                      | 1            | ITT events are only triggered in master thread
-|                      | **2**        | **ITT events are triggered in all OMP/TBB threads**
+| Environment Variable  | Value        | Description
+| :---                  | :---         | :---
+| ONEDNN_ITT_TASK_LEVEL | 0            | no ITT event will be triggered
+| ^                     | 1            | ITT events are only triggered in master thread
+| ^                     | **2** (default) | **ITT events are triggered in all OMP/TBB threads**
 
 ## Example: Profiling with VTune Amplifier
 
 For this section, it is assumed that the performance profiling environment is
 already set up.
 
-### profiling for hotspots
+### Profiling for Hotspots
 
 Collect profiling data:
 
@@ -101,7 +101,7 @@ tests:5 passed:5 skipped:0 mistrusted:0 unimplemented:0 failed:0 listed:0
 total perf: min(ms):72.6726 avg(ms):83.6142
 ~~~
 
-@note Here, it is not necessary to set the `DNNL_JIT_PROFILE` environment
+@note Here, it is not necessary to set the `ONEDNN_JIT_PROFILE` environment
 variable.
 
 Below are the top 10 function hotspots using the command-line interface:
@@ -118,8 +118,8 @@ benchdnn  [Dynamic code]    _jit_avx512_common_conv_fwd_kernel     256.715527
 benchdnn  libgomp.so.1.0.0  func@0x194f0                           186.604226
 benchdnn  libgomp.so.1.0.0  func@0x19370                           82.609694
 benchdnn  libdnnl.so.1.8    dnnl::impl::cpu::x64::jit_avx512_co..  35.682241
-benchdnn  vmlinux           [vmlinux]                                                                                                                                                                                                          10.763433
-
+benchdnn  vmlinux           [vmlinux]
+       10.763433
 ~~~
 
 The JIT-ed function `_jit_avx512_common_conv_fwd_kernel` is shown as belonging
@@ -134,10 +134,11 @@ Column filter is ON.
 Task Type           CPU Time
 convolution         1451.459338
 [Outside any task]  280.489764
-reorder             10.434821                                                                                                                                                                                             10.763433
+reorder             10.434821 
+       10.763433
 ~~~
 
-### Profiling for Micro-architecture Information
+### Profiling for Microarchitecture Information
 
 Collect profiling data:
 
@@ -214,7 +215,7 @@ Front-End Bound:Front-End Latency:ICache Misses:Self
 See more examples in the [VTune Amplifier User Guide](https://software.intel.com/content/www/us/en/develop/documentation/vtune-help/top/introduction/tutorials-and-samples.html)
 
 
-## Example: Profiling with Linux perf
+## Example: Profiling with Linux Perf
 
 The following command instructs oneDNN to enable both jitdump and perfmap
 profiling modes and write jitdump files into the `.debug` directory in the
@@ -222,7 +223,7 @@ current directory by setting environment variable `JITDUMPDIR` to point to the
 current directory.
 
 ~~~sh
-$ JITDUMPDIR=. DNNL_JIT_PROFILE=6 perf record -k1 ./tests/benchdnn/benchdnn --conv --mode=P mb1ic32ih14oc32oh14kh3ph1n"resnet_50:res4a_branch2b*6"
+$ JITDUMPDIR=. ONEDNN_JIT_PROFILE=6 perf record -k1 ./tests/benchdnn/benchdnn --conv --mode=P mb1ic32ih14oc32oh14kh3ph1n"resnet_50:res4a_branch2b*6"
 Output template: perf,%engine%,%name%,%desc%,%Gops%,%Gfreq%,%-time%,%-Gflops%,%0time%,%0Gflops%
 perf,cpu,resnet_50:res4a_branch2b*6,--conv mb1ic32ih14oc32oh14kh3ph1nresnet_50:res4a_branch2b*6,0.0032768,0,0.0131836,248.551,0.0262988,124.599
 tests:1 passed:0 skipped:0 mistrusted:0 unimplemented:0 failed:0 listed:0

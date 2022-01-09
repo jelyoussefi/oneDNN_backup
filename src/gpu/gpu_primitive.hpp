@@ -19,6 +19,7 @@
 
 #include <cassert>
 
+#include "common/cache_blob.hpp"
 #include "common/primitive.hpp"
 #include "common/utils.hpp"
 #include "gpu/compute/compute.hpp"
@@ -44,6 +45,28 @@ namespace gpu {
 struct gpu_primitive_t : public primitive_t {
     using primitive_t::primitive_t;
 
+    struct compute_block_t {
+        enum class kind_t { kernel, primitive };
+
+        compute_block_t(const compute::kernel_t &kernel)
+            : kind_(kind_t::kernel), kernel_(kernel), primitive_(nullptr) {}
+        compute_block_t(const primitive_t *primitive)
+            : kind_(kind_t::primitive), primitive_(primitive) {}
+
+        bool is_kernel() const { return kind_ == kind_t::kernel; }
+        bool is_primitive() const { return kind_ == kind_t::primitive; }
+        explicit operator bool() const { return kernel_ || primitive_; }
+
+        const primitive_t *primitive() const { return primitive_; }
+        compute::kernel_t kernel() const { return kernel_; }
+        kind_t kind() const { return kind_; }
+
+    private:
+        kind_t kind_;
+        compute::kernel_t kernel_;
+        const primitive_t *primitive_;
+    };
+
 #ifdef DNNL_USE_RT_OBJECTS_IN_PRIMITIVE_CACHE
     const resource_mapper_t *cached_mapper() const { return &cached_mapper_; }
 
@@ -51,12 +74,20 @@ struct gpu_primitive_t : public primitive_t {
         CHECK(fill_mapper(engine, cached_mapper_));
         // When caching kernels, each primitve from the hierarchy has its
         // own mapper and is responsible for filling it.
-        for (const auto &np : nested_primitives()) {
-            if (np) CHECK(np->init_cached_resource(engine));
-        }
-        // Clear kernels with binary state to decrease memory consumption.
-        for (auto &rk : registered_kernels_) {
-            if (rk) rk.clear();
+        for (const auto &cb : compute_blocks()) {
+            if (!cb) continue;
+
+            switch (cb.kind()) {
+                case compute_block_t::kind_t::primitive:
+                    CHECK(cb.primitive()->init_cached_resource(engine));
+                    break;
+                case compute_block_t::kind_t::kernel:
+                    // Clear kernels with binary state to decrease memory
+                    // consumption.
+                    cb.kernel().clear();
+                    break;
+                default: assert(!"unexpected"); return status::runtime_error;
+            }
         }
         return status::success;
     }
@@ -66,19 +97,76 @@ struct gpu_primitive_t : public primitive_t {
         CHECK(fill_mapper(engine, mapper));
         // When caching binaries there is a single common mapper that is
         // filled for the whole hierarchy of primitives.
-        for (const auto &np : nested_primitives()) {
-            if (np) CHECK(np->create_resource(engine, mapper));
+        for (const auto &cb : compute_blocks()) {
+            if (cb && cb.is_primitive())
+                CHECK(cb.primitive()->create_resource(engine, mapper));
         }
         return status::success;
     }
 #endif
 
-    status_t create_kernel(engine_t *engine, compute::kernel_t *kernel,
-            jit::jit_generator_base &jitter) {
+    status_t get_cache_blob_size(size_t *size) const override {
+        if (!size) return status::invalid_arguments;
+        // Query binary size for each created kernel.
+        for (const auto &cb : compute_blocks()) {
+            if (!cb) continue;
 
+            switch (cb.kind()) {
+                case compute_block_t::kind_t::kernel: {
+                    size_t sz = 0;
+                    CHECK(cb.kernel().binary_size(&sz));
+                    // We need additional sizeof(size_t) bytes to store the size
+                    // of the binary when packing.
+                    (*size) += sz + sizeof(size_t);
+                    break;
+                }
+                case compute_block_t::kind_t::primitive:
+                    CHECK(cb.primitive()->get_cache_blob_size(size));
+                    break;
+                default: assert(!"unexpected"); return status::runtime_error;
+            }
+        }
+        return status::success;
+    }
+
+    status_t get_cache_blob(
+            engine_t *engine, cache_blob_t &blob) const override {
+        for (const auto &cb : compute_blocks()) {
+            if (!cb) continue;
+
+            switch (cb.kind()) {
+                case compute_block_t::kind_t::kernel: {
+                    compute::binary_t binary;
+#ifdef DNNL_USE_RT_OBJECTS_IN_PRIMITIVE_CACHE
+                    const resource_mapper_t *rm = cached_mapper();
+                    ;
+                    const auto *resource = rm->get<gpu_resource_t>(this);
+                    const auto &realized_kernel
+                            = resource->get_kernel(cb.kernel().id());
+                    // Get binaries for all kernels within current primitive.
+                    // TODO: Copy binary directly to `blob` when binary cache
+                    // mode is removed.
+                    CHECK(realized_kernel.binary(engine, binary));
+#else
+                    binary = *(cb.kernel().binary());
+#endif
+                    CHECK(blob.add_binary(binary.data(), binary.size()));
+                    break;
+                }
+                case compute_block_t::kind_t::primitive:
+                    CHECK(cb.primitive()->get_cache_blob(engine, blob));
+                    break;
+                default: assert(!"unexpected"); return status::runtime_error;
+            }
+        }
+        return status::success;
+    }
+
+    status_t create_kernel(engine_t *engine, compute::kernel_t *kernel,
+            jit::jit_generator_base *jitter) {
         auto *compute_engine
                 = utils::downcast<compute::compute_engine_t *>(engine);
-        CHECK(compute_engine->create_kernel(kernel, jitter));
+        CHECK(compute_engine->create_kernel(kernel, jitter, cache_blob()));
         register_kernels({*kernel});
         return status::success;
     }
@@ -90,7 +178,7 @@ struct gpu_primitive_t : public primitive_t {
         auto *compute_engine
                 = utils::downcast<compute::compute_engine_t *>(engine);
         CHECK(compute_engine->create_kernels(
-                kernels, kernel_names, kernel_ctx));
+                kernels, kernel_names, kernel_ctx, cache_blob()));
         register_kernels(*kernels);
         return status::success;
     }
@@ -105,14 +193,23 @@ struct gpu_primitive_t : public primitive_t {
         return status;
     }
 
-protected:
-    void register_kernels(const std::vector<compute::kernel_t> &kernels) {
-        for (const auto &k : kernels) {
-            registered_kernels_.push_back(k);
-        }
+    status_t create_nested_primitive(std::shared_ptr<primitive_t> &primitive,
+            const std::shared_ptr<primitive_desc_t> &pd, engine_t *engine) {
+        CHECK(pd->create_primitive(primitive, engine, cache_blob()));
+        register_primitive(primitive.get());
+        return status::success;
     }
 
-    virtual primitive_list_t nested_primitives() const { return {}; }
+protected:
+    void register_primitive(const primitive_t *primitive) {
+        registered_compute_blocks_.emplace_back(primitive);
+    }
+
+    void register_kernels(const std::vector<compute::kernel_t> &kernels) {
+        for (const auto &k : kernels) {
+            registered_compute_blocks_.emplace_back(k);
+        }
+    }
 
     virtual status_t init_res_storage(
             engine_t *engine, gpu_resource_t *r) const {
@@ -167,16 +264,20 @@ protected:
     }
 
 private:
+    const std::vector<compute_block_t> &compute_blocks() const {
+        return registered_compute_blocks_;
+    }
+
     status_t fill_mapper(engine_t *engine, resource_mapper_t &mapper) const {
         if (mapper.has_resource(this)) return status::success;
         auto r = utils::make_unique<gpu_resource_t>();
         if (!r) return status::out_of_memory;
         compute::program_list_t programs(engine);
-        for (const auto &rk : registered_kernels_) {
-            if (!rk) continue;
+        for (const auto &cb : compute_blocks()) {
+            if (!cb || !cb.is_kernel()) continue;
             compute::kernel_t realized_kernel;
-            CHECK(rk.realize(&realized_kernel, engine, &programs));
-            r->add_kernel(rk.id(), realized_kernel);
+            CHECK(cb.kernel().realize(&realized_kernel, engine, &programs));
+            r->add_kernel(cb.kernel().id(), realized_kernel);
         }
         CHECK(init_res_storage(engine, r.get()));
         mapper.add(this, std::move(r));
@@ -200,9 +301,9 @@ private:
 #ifdef DNNL_USE_RT_OBJECTS_IN_PRIMITIVE_CACHE
     // Make these mutable to allow modifying them from `init_cached_resource`.
     mutable resource_mapper_t cached_mapper_;
-    mutable std::vector<compute::kernel_t> registered_kernels_;
+    mutable std::vector<compute_block_t> registered_compute_blocks_;
 #else
-    std::vector<compute::kernel_t> registered_kernels_;
+    std::vector<compute_block_t> registered_compute_blocks_;
 #endif
 };
 

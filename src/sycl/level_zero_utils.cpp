@@ -40,10 +40,15 @@
 #error "Level Zero is not supported with this compiler version"
 #endif
 
-#include <CL/sycl/backend/level_zero.hpp>
-
 #include "common/c_types_map.hpp"
 #include "common/verbose.hpp"
+
+#include "sycl/sycl_utils.hpp"
+#if DNNL_USE_SYCL121_API
+#include <CL/sycl/backend/level_zero.hpp>
+#else
+#include <sycl/ext/oneapi/backend/level_zero.hpp>
+#endif
 
 #include "sycl/sycl_gpu_engine.hpp"
 
@@ -53,40 +58,53 @@ namespace sycl {
 
 namespace {
 
-#define ZE_CHECK(f) \
+#define ZE_CHECK_COMMON(f, retval) \
     do { \
         ze_result_t res_ = (f); \
         if (res_ != ZE_RESULT_SUCCESS) { \
             if (get_verbose()) { \
-                printf("dnnl_verbose,gpu,ze_error,%d\n", (int)(res_)); \
+                printf("onednn_verbose,gpu,ze_error,%d\n", (int)(res_)); \
                 fflush(0); \
             } \
-            return status::runtime_error; \
+            return retval; \
         } \
     } while (false)
+
+#define ZE_CHECK(f) ZE_CHECK_COMMON(f, status::runtime_error)
+#define ZE_CHECK_VP(f) ZE_CHECK_COMMON(f, nullptr)
 
 void *find_ze_symbol(const char *symbol) {
 #if defined(__linux__)
     void *handle = dlopen("libze_loader.so.1", RTLD_NOW | RTLD_LOCAL);
 #elif defined(_WIN32)
-    HMODULE handle = LoadLibraryA("ze_loader.dll");
+    // Use LOAD_LIBRARY_SEARCH_SYSTEM32 flag to avoid DLL hijacking issue.
+    HMODULE handle = LoadLibraryExA(
+            "ze_loader.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
 #endif
     if (!handle) {
         if (get_verbose())
-            printf("dnnl_verbose,gpu,error,cannot find Level Zero loader "
+            printf("onednn_verbose,gpu,error,cannot find Level Zero loader "
                    "library\n");
         assert(!"not expected");
         return nullptr;
     }
 
+    using zeInit_decl_t = ze_result_t (*)(ze_init_flags_t flags);
+    const ze_init_flags_t default_ze_flags = 0;
 #if defined(__linux__)
+    static const ze_result_t ze_result = reinterpret_cast<zeInit_decl_t>(
+            dlsym(handle, "zeInit"))(default_ze_flags);
     void *f = reinterpret_cast<void *>(dlsym(handle, symbol));
 #elif defined(_WIN32)
+    static const ze_result_t ze_result = reinterpret_cast<zeInit_decl_t>(
+            GetProcAddress(handle, "zeInit"))(default_ze_flags);
     void *f = reinterpret_cast<void *>(GetProcAddress(handle, symbol));
 #endif
+    ZE_CHECK_VP(ze_result);
+
     if (!f) {
         if (get_verbose())
-            printf("dnnl_verbose,gpu,error,cannot find symbol: %s\n", symbol);
+            printf("onednn_verbose,gpu,error,cannot find symbol: %s\n", symbol);
         assert(!"not expected");
     }
     return f;
@@ -120,16 +138,29 @@ status_t func_zeDeviceGetProperties(
 
 } // namespace
 
+// This function is called from compatibility layer that ensures compatibility
+// with SYCL 2017 API. Once the compatibility layer is removed this function
+// can be moved to the anonymous namespace above and a function with SYCL
+// data types in its interface can be created to call it.
+status_t func_zeKernelCreate(ze_module_handle_t hModule,
+        const ze_kernel_desc_t *desc, ze_kernel_handle_t *phKernel) {
+    static auto f = find_ze_symbol<decltype(&zeKernelCreate)>("zeKernelCreate");
+
+    if (!f) return status::runtime_error;
+    ZE_CHECK(f(hModule, desc, phKernel));
+    return status::success;
+}
+
 // FIXME: Currently SYCL doesn't provide any API to get device UUID so
 // we query it directly from Level0 with the zeDeviceGetProperties function.
 // The `get_device_uuid` function packs 128 bits of the device UUID, which are
 // represented as an uint8_t array of size 16, to 2 uint64_t values.
-device_uuid_t get_device_uuid(const cl::sycl::device &dev) {
+device_uuid_t get_device_uuid(const ::sycl::device &dev) {
     static_assert(ZE_MAX_DEVICE_UUID_SIZE == 16,
             "ZE_MAX_DEVICE_UUID_SIZE is expected to be 16");
 
     ze_device_properties_t ze_device_properties;
-    auto ze_device = dev.get_native<cl::sycl::backend::level_zero>();
+    auto ze_device = compat::get_native<ze_device_handle_t>(dev);
     auto status = func_zeDeviceGetProperties(ze_device, &ze_device_properties);
     MAYBE_UNUSED(status);
     assert(status == status::success);
@@ -144,10 +175,11 @@ device_uuid_t get_device_uuid(const cl::sycl::device &dev) {
     return device_uuid_t(uuid[0], uuid[1]);
 }
 
-status_t sycl_create_program_with_level_zero(
-        std::unique_ptr<cl::sycl::program> &sycl_program,
-        const sycl_gpu_engine_t *sycl_engine,
-        const gpu::compute::binary_t *binary) {
+status_t sycl_create_kernel_with_level_zero(
+        std::unique_ptr<::sycl::kernel> &sycl_kernel,
+        const std::string &kernel_name, const sycl_gpu_engine_t *sycl_engine,
+        const gpu::compute::binary_t *binary,
+        gpu::compute::program_list_t *programs) {
     auto desc = ze_module_desc_t();
     desc.stype = ZE_STRUCTURE_TYPE_MODULE_DESC;
     desc.format = ZE_MODULE_FORMAT_NATIVE;
@@ -159,21 +191,21 @@ status_t sycl_create_program_with_level_zero(
     ze_module_handle_t ze_module;
 
     auto ze_device
-            = sycl_engine->device().get_native<cl::sycl::backend::level_zero>();
-    auto ze_ctx = sycl_engine->context()
-                          .get_native<cl::sycl::backend::level_zero>();
+            = compat::get_native<ze_device_handle_t>(sycl_engine->device());
+    auto ze_ctx
+            = compat::get_native<ze_context_handle_t>(sycl_engine->context());
+
     CHECK(func_zeModuleCreate(ze_ctx, ze_device, &desc, &ze_module, nullptr));
-    sycl_program.reset(
-            new cl::sycl::program(cl::sycl::level_zero::make<cl::sycl::program>(
-                    sycl_engine->context(), ze_module)));
+    CHECK(compat::make_kernel(sycl_kernel, kernel_name, sycl_engine, ze_module,
+            binary, programs));
 
     return status::success;
 }
 
-bool compare_ze_devices(
-        const cl::sycl::device &lhs, const cl::sycl::device &rhs) {
-    auto lhs_ze_handle = lhs.get_native<cl::sycl::backend::level_zero>();
-    auto rhs_ze_handle = rhs.get_native<cl::sycl::backend::level_zero>();
+bool compare_ze_devices(const ::sycl::device &lhs, const ::sycl::device &rhs) {
+    auto lhs_ze_handle = compat::get_native<ze_device_handle_t>(lhs);
+    auto rhs_ze_handle = compat::get_native<ze_device_handle_t>(rhs);
+
     return lhs_ze_handle == rhs_ze_handle;
 }
 
@@ -187,17 +219,16 @@ namespace dnnl {
 namespace impl {
 namespace sycl {
 
-device_uuid_t get_device_uuid(const cl::sycl::device &) {
+device_uuid_t get_device_uuid(const ::sycl::device &) {
     return device_uuid_t(0, 0);
 }
 
-status_t sycl_create_program_with_level_zero(
-        std::unique_ptr<cl::sycl::kernel> &, const sycl_gpu_engine_t *,
-        const gpu::compute::binary_t *) {
+status_t sycl_create_kernel_with_level_zero(std::unique_ptr<::sycl::kernel> &,
+        const sycl_gpu_engine_t *, const gpu::compute::binary_t *) {
     return status::unimplemented;
 }
 
-bool compare_ze_devices(const cl::sycl::device &, const cl::sycl::device &) {
+bool compare_ze_devices(const ::sycl::device &, const ::sycl::device &) {
     return false;
 }
 

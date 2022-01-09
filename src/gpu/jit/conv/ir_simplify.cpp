@@ -20,6 +20,7 @@
 #include <string>
 #include <vector>
 
+#include "common/cpp_compat.hpp"
 #include "common/math_utils.hpp"
 #include "gpu/jit/conv/ir.hpp"
 #include "gpu/jit/conv/utils.hpp"
@@ -58,6 +59,8 @@ public:
     static expr_t y() { return pexpr_t::make(1); }
     static expr_t z() { return pexpr_t::make(2); }
 
+    IR_DECLARE_TRAVERSERS()
+
     int id;
 
 private:
@@ -91,6 +94,12 @@ public:
     }
 
     size_t get_hash() const override { return ir_utils::get_hash(value); }
+
+    std::string str() const override {
+        std::ostringstream oss;
+        oss << "pint_imm_t(" << value << ")";
+        return oss.str();
+    }
 
     int id;
     int64_t value;
@@ -135,21 +144,11 @@ public:
 
     pexpr_substitute_t(const match_context_t *ctx) : ctx_(ctx) {}
 
-    dispatch_func_type find_dispatch_func(int64_t ti) const override {
-        if (ti == pexpr_t::_dispatch_type_id())
-            return &pexpr_substitute_t::call<pexpr_t>;
-        return ir_mutator_t::find_dispatch_func(ti);
+    object_t _mutate(const pexpr_t &obj) override {
+        return (*ctx_)[expr_t(obj)];
     }
-
-    object_t _mutate(const pexpr_t &obj) { return (*ctx_)[expr_t(obj)]; }
 
 private:
-    template <typename T>
-    static object_t call(ir_mutator_t *mutator, const object_impl_t &obj) {
-        auto *this_mutator = (pexpr_substitute_t *)mutator;
-        return this_mutator->_mutate((const T &)obj);
-    }
-
     const match_context_t *ctx_;
 };
 
@@ -209,11 +208,15 @@ bool match(const expr_t &ptrn, const expr_t &expr, match_context_t &ctx) {
     if (ptrn.is_equal(expr)) return true;
 
     if (ptrn.is<pint_imm_t>()) {
-        if (!expr.is<int_imm_t>()) return false;
-
-        auto &expr_imm = expr.as<int_imm_t>();
         auto &ptrn_imm = ptrn.as<pint_imm_t>();
-        return ptrn_imm.matches(expr_imm);
+
+        bool ok = false;
+        if (expr.is<int_imm_t>()) {
+            ok = ptrn_imm.matches(expr.as<int_imm_t>());
+        } else if (ptrn_imm.id == -1 && expr.is<float_imm_t>()) {
+            ok = (to_cpp<float>(expr) == ptrn_imm.value);
+        }
+        return ok;
     }
 
     if (ptrn.is<pexpr_t>()) {
@@ -365,7 +368,6 @@ public:
     }
 };
 
-// Simplifies expression using rewriting rules.
 expr_t simplify_rewrite(const expr_t &e) {
     expr_t ret;
     if (is_const(e) || is_var(e)) {
@@ -610,20 +612,6 @@ public:
         auto args = mutate(obj.args);
         if (ir_utils::is_equal(args, obj.args)) return obj;
         return make_nary_op(obj.op_kind, args);
-    }
-
-protected:
-    dispatch_func_type find_dispatch_func(int64_t ti) const override {
-        if (ti == nary_op_t::_dispatch_type_id())
-            return &nary_op_mutator_t::call<nary_op_t>;
-        return ir_mutator_t::find_dispatch_func(ti);
-    }
-
-private:
-    template <typename T>
-    static object_t call(ir_mutator_t *mutator, const object_impl_t &obj) {
-        auto *this_mutator = (nary_op_mutator_t *)mutator;
-        return this_mutator->_mutate((const nary_op_t &)obj);
     }
 };
 
@@ -933,7 +921,7 @@ public:
         return f_common.is_equal(other);
     }
 
-    static void reduce(expr_t &a, expr_t &b) {
+    static expr_t reduce(expr_t &a, expr_t &b) {
         auto fa_expr = factored_expr_t::make(a);
         auto fb_expr = factored_expr_t::make(b);
         auto &fa = fa_expr.as<factored_expr_t>();
@@ -941,6 +929,7 @@ public:
         auto f_common = fa.intersect(&fb);
         a = fa.reduce(f_common).as<factored_expr_t>().expr();
         b = fb.reduce(f_common).as<factored_expr_t>().expr();
+        return f_common;
     }
 
     std::vector<expr_t> factors;
@@ -1108,7 +1097,7 @@ public:
             return mutate_with_add(*binary_op);
 
         // Try to reduce a and b.
-        factored_expr_t::reduce(a, b);
+        auto common_factor = factored_expr_t::reduce(a, b);
 
         if (is_one(b)) {
             if (binary_op->op_kind == op_kind_t::_mod)
@@ -1116,7 +1105,13 @@ public:
             if (binary_op->op_kind == op_kind_t::_div) return std::move(a);
         }
 
-        if (binary_op->op_kind == op_kind_t::_div) return a / b;
+        if (binary_op->op_kind == op_kind_t::_div) {
+            return a / b;
+        } else if (binary_op->op_kind == op_kind_t::_mod) {
+            auto &c = common_factor.as<factored_expr_t>();
+            if (c.is_const() && to_cpp<int64_t>(c.const_factor()) > 1)
+                return make_nary_op(op_kind_t::_mul, {c.const_factor(), a % b});
+        }
 
         return obj;
     }
@@ -1413,8 +1408,21 @@ class stmt_simplifier_t : public ir_mutator_t {
 public:
     stmt_simplifier_t(const constraint_set_t &cset) : cset_(cset) {}
 
+    ~stmt_simplifier_t() override {
+        if (!cpp_compat::uncaught_exceptions()) {
+            ir_assert(continue_calls_.empty()) << "Unexpected continue calls.";
+        }
+    }
+
     object_t _mutate(const binary_op_t &obj) override {
         return simplify(obj, cset_);
+    }
+
+    object_t _mutate(const func_call_t &obj) override {
+        if (obj.func.is_equal(funcs::continue_func())) {
+            continue_calls_.push_back(obj);
+        }
+        return ir_mutator_t::_mutate(obj);
     }
 
     object_t _mutate(const if_t &obj) override {
@@ -1464,18 +1472,47 @@ public:
     }
 
     object_t _mutate(const for_t &obj) override {
+        object_t new_obj;
+        bool found_continue = false;
+        size_t ncontinue_calls = continue_calls_.size();
         if (is_zero(obj.init) && is_one(obj.bound)) {
             auto body = substitute(obj.body, obj.var, expr_t(0));
-            return mutate(body);
+            body = mutate(body);
+            if (continue_calls_.size() > ncontinue_calls) found_continue = true;
+            if (found_continue) {
+                new_obj = for_t::make(
+                        obj.var, obj.init, obj.bound, body, obj.unroll);
+            } else {
+                new_obj = body;
+            }
+        } else {
+            auto cset_old = cset_;
+            cset_.add_constraint(obj.var >= obj.init);
+            cset_.add_constraint(obj.var < obj.bound);
+            new_obj = ir_mutator_t::_mutate(obj);
+            if (continue_calls_.size() > ncontinue_calls) found_continue = true;
+            cset_ = cset_old;
         }
 
-        auto cset_old = cset_;
-        cset_.add_constraint(obj.var >= obj.init);
-        cset_.add_constraint(obj.var < obj.bound);
-        auto new_obj = ir_mutator_t::_mutate(obj);
-        cset_ = cset_old;
+        // Remove continue call.
+        if (found_continue) continue_calls_.pop_back();
 
         return new_obj;
+    }
+
+    object_t _mutate(const store_t &obj) override {
+        auto new_obj = ir_mutator_t::_mutate(obj);
+
+        auto &store = new_obj.as<store_t>();
+        if (!store.value.is<load_t>()) return new_obj;
+
+        auto &load = store.value.as<load_t>();
+        if (!store.buf.is_equal(load.buf)) return new_obj;
+        if (!store.off.is_equal(load.off)) return new_obj;
+        if (store.stride != load.stride) return new_obj;
+
+        // This is a load/store of the same value which is a no-op.
+        return stmt_t();
     }
 
 private:
@@ -1514,6 +1551,7 @@ private:
     }
 
     constraint_set_t cset_;
+    std::vector<stmt_t> continue_calls_;
 };
 
 expr_t simplify_expr(const expr_t &_e, const constraint_set_t &cset) {
@@ -1537,6 +1575,18 @@ expr_t simplify_expr(const expr_t &_e, const constraint_set_t &cset) {
 stmt_t simplify_stmt(const stmt_t &s, const constraint_set_t &cset) {
     stmt_simplifier_t simplifier(cset);
     return simplifier.mutate(s);
+}
+
+int64_t get_max_const_factor(const expr_t &_e, const constraint_set_t &cset) {
+    ir_assert(_e.type().is_int());
+    auto e = _e;
+    // Some complex expressions need more than one simplify() call.
+    int max_tries = 3;
+    for (int i = 0; i < max_tries; i++)
+        e = simplify(e, cset);
+    auto o = factored_expr_t::make(nary_op_canonicalize(e));
+    auto &expr = o.as<factored_expr_t>();
+    return to_cpp<int64_t>(expr.const_factor());
 }
 
 template <op_kind_t op_kind>
@@ -1573,6 +1623,22 @@ DECL_OP_TRAITS(op_kind_t::_lt, <)
 DECL_OP_TRAITS(op_kind_t::_le, <=)
 
 DECL_OP_TRAITS(op_kind_t::_and, &&)
+
+template <>
+struct op_traits_t<op_kind_t::_min> {
+    template <typename T>
+    static T compute(T a, T b) {
+        return std::min(a, b);
+    }
+};
+
+template <>
+struct op_traits_t<op_kind_t::_max> {
+    template <typename T>
+    static T compute(T a, T b) {
+        return std::max(a, b);
+    }
+};
 
 #undef DECL_OP_TRAITS
 
@@ -1618,6 +1684,8 @@ public:
             CASE(op_kind_t::_le)
 
             CASE(op_kind_t::_and)
+            CASE(op_kind_t::_min)
+            CASE(op_kind_t::_max)
 
             default: ir_error_not_expected();
 
@@ -1991,6 +2059,16 @@ expr_t const_fold_non_recursive(const expr_t &e) {
         if (!is_const(iif->cond)) return e;
         if (to_cpp<bool>(iif->cond)) return iif->true_expr;
         return iif->false_expr;
+    }
+
+    auto *cast = e.as_ptr<cast_t>();
+    if (cast && !cast->saturate) {
+        if (cast->expr.is<bool_imm_t>())
+            return to_expr(to_cpp<bool>(cast->expr), cast->type);
+        if (cast->expr.is<int_imm_t>())
+            return to_expr(to_cpp<int64_t>(cast->expr), cast->type);
+        if (cast->expr.is<float_imm_t>())
+            return to_expr(to_cpp<float>(cast->expr), cast->type);
     }
 
     return e;

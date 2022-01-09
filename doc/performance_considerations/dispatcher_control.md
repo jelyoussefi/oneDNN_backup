@@ -9,15 +9,15 @@ debugging purposes or for performance exploration.
 ## Build-time Controls
 
 At build-time, support for this feature is controlled via cmake option
-`DNNL_ENABLE_MAX_CPU_ISA`.
+`ONEDNN_ENABLE_MAX_CPU_ISA`.
 
 | CMake Option                | Supported values (defaults in bold) | Description
 | :---                        | :---                                | :---
-| DNNL_ENABLE_MAX_CPU_ISA     | **ON**, OFF                         | Enables [CPU dispatcher controls](@ref dev_guide_cpu_dispatcher_control)
+| ONEDNN_ENABLE_MAX_CPU_ISA   | **ON**, OFF                         | Enables [CPU dispatcher controls](@ref dev_guide_cpu_dispatcher_control)
 
 ## Run-time Controls
 
-When the feature is enabled at build-time, the `DNNL_MAX_CPU_ISA` environment
+When the feature is enabled at build-time, the `ONEDNN_MAX_CPU_ISA` environment
 variable can be used to limit processor features oneDNN is able to detect to
 certain Instruction Set Architecture (ISA) and older instruction sets. It can
 also be used to enable ISAs with initial support in the library that are
@@ -25,7 +25,7 @@ otherwise disabled by default.
 
 | Environment variable | Value            | Description
 | :---                 | :---             | :---
-| DNNL_MAX_CPU_ISA     | SSE41            | Intel Streaming SIMD Extensions 4.1 (Intel SSE4.1)
+| ONEDNN_MAX_CPU_ISA   | SSE41            | Intel Streaming SIMD Extensions 4.1 (Intel SSE4.1)
 | \                    | AVX              | Intel Advanced Vector Extensions (Intel AVX)
 | \                    | AVX2             | Intel Advanced Vector Extensions 2 (Intel AVX2)
 | \                    | AVX2_VNNI        | Intel AVX2 with Intel Deep Learning Boost (Intel DL Boost)
@@ -34,8 +34,8 @@ otherwise disabled by default.
 | \                    | AVX512_CORE      | Intel AVX-512 with AVX512BW, AVX512VL, and AVX512DQ extensions
 | \                    | AVX512_CORE_VNNI | Intel AVX-512 with Intel DL Boost
 | \                    | AVX512_CORE_BF16 | Intel AVX-512 with Intel DL Boost and bfloat16 support
-| \                    | **ALL**          | **No restrictions on the above ISAs, but excludes the below ISAs with initial support in the library (default)**
-| \                    | AVX512_CORE_AMX  | Intel AVX-512 with Intel DL Boost and bfloat16 support and Intel Advanced Matrix Extensions (Intel AMX) with 8-bit integer and bfloat16 support (**initial support**)
+| \                    | AVX512_CORE_AMX  | Intel AVX-512 with Intel DL Boost and bfloat16 support and Intel Advanced Matrix Extensions (Intel AMX) with 8-bit integer and bfloat16 support
+| \                    | **ALL**          | **No restrictions (default)**
 
 @note The ISAs are partially ordered:
 * SSE41 < AVX < AVX2,

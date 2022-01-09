@@ -73,7 +73,7 @@ if(DNNL_DPCPP_HOST_COMPILER STREQUAL "DEFAULT")
 endif()
 
 # special case for clang-cl (not recognized by cmake up to 3.17)
-if(NOT OpenMP_CXX_FOUND AND MSVC AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND NOT DNNL_WITH_SYCL)
+if(NOT OpenMP_CXX_FOUND AND MSVC AND CMAKE_CXX_COMPILER_ID MATCHES "(Clang|IntelLLVM)")
     # clang-cl and icx will fall under this condition
     # CAVEAT: undocumented variable, may be inappropriate
     if(CMAKE_BASE_NAME STREQUAL "icx")
@@ -96,8 +96,11 @@ if(NOT OpenMP_CXX_FOUND AND MSVC AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND 
 endif()
 
 # add flags unconditionally to always utilize openmp-simd for any threading runtime
-if(OpenMP_CXX_FOUND)
+if(OpenMP_C_FOUND)
     append(CMAKE_C_FLAGS ${OpenMP_C_FLAGS})
+endif()
+
+if(OpenMP_CXX_FOUND)
     append(CMAKE_CXX_FLAGS ${OpenMP_CXX_FLAGS})
 endif()
 

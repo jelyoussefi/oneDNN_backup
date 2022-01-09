@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2020-2021 Intel Corporation
+* Copyright 2020-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -36,8 +36,11 @@ uint64_t get_future_extensions(compute::gpu_arch_t gpu_arch) {
 
     uint64_t extensions = 0;
     switch (gpu_arch) {
+        case gpu_arch_t::gen9:
+        case gpu_arch_t::gen11: break;
         case gpu_arch_t::xe_hp:
         case gpu_arch_t::xe_hpg:
+        case gpu_arch_t::xe_hpc:
             extensions |= (uint64_t)device_ext_t::intel_global_float_atomics;
             extensions |= (uint64_t)
                     device_ext_t::intel_subgroup_matrix_multiply_accumulate;
@@ -47,23 +50,12 @@ uint64_t get_future_extensions(compute::gpu_arch_t gpu_arch) {
                     |= (uint64_t)device_ext_t::intel_variable_eu_thread_count;
             extensions |= (uint64_t)device_ext_t::future_bf16_cvt;
         case gpu_arch_t::xe_lp:
+            extensions |= (uint64_t)device_ext_t::intel_subgroup_local_block_io;
             extensions |= (uint64_t)device_ext_t::intel_dot_accumulate;
             break;
-        default: break;
+        case gpu_arch_t::unknown: break;
     }
     return extensions;
-}
-
-inline gpu_arch_t str2gpu_arch(const char *str) {
-#define CASE(_case) \
-    if (!strcmp(STRINGIFY(_case), str)) return gpu_arch_t::_case
-
-    CASE(gen9);
-    CASE(xe_lp);
-    CASE(xe_hp);
-    CASE(xe_hpg);
-    return gpu_arch_t::unknown;
-#undef CASE
 }
 
 bool device_info_t::mayiuse_ngen_kernels(engine_t *engine) {
@@ -77,7 +69,7 @@ bool device_info_t::mayiuse_ngen_kernels(engine_t *engine) {
     if (status != status::success) mayiuse_ngen_kernels_ = false;
 
     if (get_verbose())
-        printf("dnnl_verbose,info,gpu,binary_kernels:%s\n",
+        printf("onednn_verbose,info,gpu,binary_kernels:%s\n",
                 mayiuse_ngen_kernels_ ? "enabled" : "disabled");
 
     checked_ngen_kernels_ = true;
@@ -86,7 +78,51 @@ bool device_info_t::mayiuse_ngen_kernels(engine_t *engine) {
 }
 
 bool device_info_t::mayiuse_sub_group(int size) const {
-    return utils::one_of(size, 8, 16, 32);
+    switch (gpu_arch()) {
+        case gpu_arch_t::xe_hpc: return utils::one_of(size, 16, 32);
+        default: return utils::one_of(size, 8, 16, 32);
+    }
+}
+
+int device_info_t::max_eus_per_wg(gpu_arch_t gpu_arch) {
+    switch (gpu_arch) {
+        case gpu::compute::gpu_arch_t::gen9:
+        case gpu::compute::gpu_arch_t::gen11:
+        case gpu::compute::gpu_arch_t::xe_hpc: return 8;
+        case gpu::compute::gpu_arch_t::xe_lp:
+        case gpu::compute::gpu_arch_t::xe_hp:
+        case gpu::compute::gpu_arch_t::xe_hpg: return 16;
+        case gpu::compute::gpu_arch_t::unknown: return 8;
+    }
+    return 8;
+}
+
+int device_info_t::threads_per_eu(gpu_arch_t gpu_arch, bool large_grf_mode) {
+    switch (gpu_arch) {
+        case gpu::compute::gpu_arch_t::gen9:
+        case gpu::compute::gpu_arch_t::gen11:
+        case gpu::compute::gpu_arch_t::xe_lp: return 7;
+        case gpu::compute::gpu_arch_t::xe_hp:
+        case gpu::compute::gpu_arch_t::xe_hpg:
+        case gpu::compute::gpu_arch_t::xe_hpc: return large_grf_mode ? 4 : 8;
+        case gpu::compute::gpu_arch_t::unknown: return 7;
+    }
+    return 7;
+}
+
+int device_info_t::max_slm_size_per_tg(
+        gpu_arch_t gpu_arch, bool large_grf_mode) {
+    int slm_size = 0; // SLM size per SS or DSS.
+    switch (gpu_arch) {
+        case gpu::compute::gpu_arch_t::gen9:
+        case gpu::compute::gpu_arch_t::gen11: slm_size = (1 << 16); break;
+        case gpu::compute::gpu_arch_t::xe_lp:
+        case gpu::compute::gpu_arch_t::xe_hp:
+        case gpu::compute::gpu_arch_t::xe_hpc:
+        case gpu::compute::gpu_arch_t::xe_hpg: slm_size = (1 << 17); break;
+        case gpu::compute::gpu_arch_t::unknown: assert(!"not expected");
+    }
+    return slm_size / threads_per_eu(gpu_arch, large_grf_mode);
 }
 
 status_t device_info_t::init_attributes_common(engine_t *engine) {
@@ -104,44 +140,26 @@ status_t device_info_t::init_attributes_common(engine_t *engine) {
     // Assumption is that HT is likely enabled on client systems.
     llc_cache_size_ = std::thread::hardware_concurrency() * (1 << 20);
 
-    // Assume 7 threads by default
-    int32_t threads_per_eu[2] = {7, 7};
-    switch (gpu_arch_) {
-        case gpu::compute::gpu_arch_t::gen9:
-        case gpu::compute::gpu_arch_t::xe_lp:
-            threads_per_eu[0] = 7;
-            threads_per_eu[1] = 7;
-            break;
-        case gpu::compute::gpu_arch_t::xe_hp:
-        case gpu::compute::gpu_arch_t::xe_hpg:
-            threads_per_eu[0] = 8; // 128 regs/thread
-            threads_per_eu[1] = 4; // 256 regs/thread
-            break;
-        default: break;
-    }
+    bool ocl_backend = true;
 
-    hw_threads_[0] = eu_count_ * threads_per_eu[0];
-    hw_threads_[1] = eu_count_ * threads_per_eu[1];
-
-    max_eus_per_wg_ = 8;
-    switch (gpu_arch_) {
-        case gpu::compute::gpu_arch_t::gen9: max_eus_per_wg_ = 8; break;
-        case gpu::compute::gpu_arch_t::xe_lp:
-        case gpu::compute::gpu_arch_t::xe_hp:
-        case gpu::compute::gpu_arch_t::xe_hpg: max_eus_per_wg_ = 16; break;
-        default: break;
-    }
-
-    mayiuse_non_uniform_work_groups_ = true;
 #ifdef DNNL_WITH_SYCL
     if (engine->runtime_kind() == runtime_kind::sycl) {
         auto *sycl_engine
                 = utils::downcast<const sycl::sycl_engine_base_t *>(engine);
-        // Level Zero backend does not support non-uniform work-groups.
-        mayiuse_non_uniform_work_groups_
-                = (sycl_engine->backend() == sycl::backend_t::opencl);
+        ocl_backend = (sycl_engine->backend() == sycl::backend_t::opencl);
     }
 #endif
+
+    // OCL runtime returns XeHP-equivalent EU count instead of true EU count on XeHPC.
+    if (ocl_backend && gpu_arch_ == gpu::compute::gpu_arch_t::xe_hpc)
+        eu_count_ /= 2;
+
+    hw_threads_[0] = eu_count_ * threads_per_eu(gpu_arch_, false);
+    hw_threads_[1] = eu_count_ * threads_per_eu(gpu_arch_, true);
+
+    max_eus_per_wg_ = max_eus_per_wg(gpu_arch_);
+
+    mayiuse_non_uniform_work_groups_ = ocl_backend;
 
     return status::success;
 }

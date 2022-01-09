@@ -27,6 +27,17 @@
 
 #include "cpu/x64/jit_uni_reorder.hpp"
 
+// #define TR_DEBUG
+#if defined(TR_DEBUG)
+#define DEBUg(...) \
+    do { \
+        __VA_ARGS__ \
+    } while (0)
+#else
+#define DEBUg(...)
+#endif
+#define DEBUG(...) DEBUg(__VA_ARGS__)
+
 using namespace dnnl::impl::types;
 using namespace dnnl::impl::status;
 
@@ -39,6 +50,14 @@ namespace tr {
 
 /** ad-hoc structure to describe blocked memory layout */
 struct layout_desc_t {
+    layout_desc_t()
+        : dt(dnnl_data_type_undef)
+        , ndims(0)
+        , id {-1}
+        , dims {0}
+        , tails {0}
+        , is_blk {false}
+        , strides {0} {}
     data_type_t dt;
     int ndims;
     dims_t id;
@@ -89,15 +108,14 @@ status_t cvt_mem_desc_to_layout_desc(const memory_desc_t &md_,
             }
         }
 
-        // TODO: should be `md.padded_dims()[d]`, but submemory descriptor fails
-        const int padded_dim = utils::rnd_up(md.dims()[d], blocks[d]);
         const int dim_with_external_padding
-                = (padded_dim + external_padding[d]) / blocks[d];
-        const int occur_num_of_padded_dim = padded_dim / blocks[d];
-        const int tail = dim_with_external_padding != occur_num_of_padded_dim
+                = (md.padded_dims()[d] + external_padding[d]) / blocks[d];
+        const int padded_dim = md.padded_dims()[d] / blocks[d];
+        const int tail = dim_with_external_padding != padded_dim
                 ? dim_with_external_padding
-                        - (dim_with_external_padding - occur_num_of_padded_dim)
+                        - (dim_with_external_padding - padded_dim)
                 : 0;
+
         add_dim(d, dim_with_external_padding, tail, !it_is_blk, bd.strides[d]);
 
         // TODO: NOW: revisit, do we need a reverse?
@@ -114,6 +132,33 @@ status_t cvt_mem_desc_to_layout_desc(const memory_desc_t &md_,
     }
 
     return success;
+}
+
+static bool is_with_groups(const memory_desc_t &dst_md) {
+    using namespace memory_extra_flags;
+    auto dst_d = memory_desc_wrapper(dst_md);
+    const int grp_bit = 1 << 1;
+    auto check_flag_and_mask = [&](int flag, int mask) {
+        return (dst_d.extra().flags & flag) && (mask & grp_bit);
+    };
+
+    return check_flag_and_mask(
+                   compensation_conv_s8s8, dst_d.extra().compensation_mask)
+            || check_flag_and_mask(compensation_conv_asymmetric_src,
+                    dst_d.extra().asymm_compensation_mask);
+}
+
+static void prb_set_compensation_strides(prb_t &p) {
+    const auto compensation_needed = p.req_s8s8_comp || p.req_asymmetric_comp;
+    if (!compensation_needed) return;
+    int mask = p.compensation_mask;
+    ptrdiff_t cs = 1;
+    for (int d = 0; d < p.ndims; ++d) {
+        if (mask & (1 << p.nodes[d].dim_id)) {
+            p.nodes[d].cs = cs;
+            cs = cs * p.nodes[d].n;
+        }
+    }
 }
 
 status_t prb_init(prb_t &p, const memory_desc_t &imd, const memory_desc_t &omd,
@@ -140,6 +185,15 @@ status_t prb_init(prb_t &p, const memory_desc_t &imd, const memory_desc_t &omd,
     dims_t iblocks, oblocks, i_tails, o_tails, i_paddings, o_paddings;
     im_d.compute_blocks(iblocks);
     om_d.compute_blocks(oblocks);
+
+    for (int d = 0; d < om_d.ndims(); ++d) {
+        const auto dim = om_d.dims()[d];
+        const auto pdim = om_d.padded_dims()[d];
+        const auto cblock = oblocks[d];
+        // do not allow excess pdim other than required for rounding-up of dim.
+        if (utils::rnd_up(dim, cblock) != pdim) return unimplemented;
+    }
+
     utils::array_set(i_tails, 0, im_d.ndims());
     utils::array_set(o_tails, 0, om_d.ndims());
     utils::array_set(i_paddings, 0, im_d.ndims());
@@ -200,25 +254,37 @@ status_t prb_init(prb_t &p, const memory_desc_t &imd, const memory_desc_t &omd,
     p.req_asymmetric_comp = om_d.extra().flags
             & memory_extra_flags::compensation_conv_asymmetric_src;
 
-    const auto compute_strides
-            = [&](ptrdiff_t *strides, const int mask) {
-                  ptrdiff_t last_stride = 1;
-                  for (int d = old.ndims - 1; d >= 0; --d) {
-                      assert((d == 0 || old.id[d - 1] <= old.id[d])
-                                    && "logical dimensions should be in ascending order");
-                      if (mask & (1 << old.id[d])) {
-                          strides[d] = last_stride;
-                          last_stride *= old.dims[d];
-                      }
-                  }
-              };
+    const bool with_groups = is_with_groups(omd);
+
+    auto mask_ok = [&](bool check, int mask) {
+        return IMPLICATION(check, mask == (with_groups ? 0x3 : 0x1));
+    };
+
+    if (!mask_ok(p.req_s8s8_comp, om_d.extra().compensation_mask)
+            || !mask_ok(p.req_asymmetric_comp,
+                    om_d.extra().asymm_compensation_mask))
+        return status::unimplemented;
 
     ptrdiff_t ss[max_ndims] = {0}; // scales strides
-    if (p.scale_type == scale_type_t::MANY)
-        compute_strides(ss, attr->output_scales_.mask_);
+    if (p.scale_type == scale_type_t::MANY) {
+        const int mask = attr->output_scales_.mask_;
+        ptrdiff_t dense_stride = 1;
+        ptrdiff_t last_stride = 1;
+        for (int d = old.ndims - 1; d >= 0; --d) {
+            assert((d == 0 || old.id[d - 1] <= old.id[d])
+                    && "logical dimensions should be in ascending order");
+            if (mask & (1 << old.id[d])) {
+                if ((d + 1) < old.ndims && old.id[d + 1] != old.id[d]
+                        && (mask & (1 << old.id[d + 1]))) {
+                    dense_stride = dense_stride * imd.dims[old.id[d + 1]];
+                    last_stride = dense_stride;
+                }
+                ss[d] = last_stride;
+                last_stride *= old.dims[d];
+            }
+        }
+    }
 
-    ptrdiff_t cs_[max_ndims] = {0}; // compensation strides
-    ptrdiff_t *cs = cs_;
     const auto compensation_needed = p.req_s8s8_comp || p.req_asymmetric_comp;
     if (compensation_needed) {
         p.compensation_mask = p.req_s8s8_comp
@@ -231,13 +297,6 @@ status_t prb_init(prb_t &p, const memory_desc_t &imd, const memory_desc_t &omd,
 
         assert(p.compensation_mask == tr::prb_t::standard_comp_mask
                 || p.compensation_mask == tr::prb_t::comp_mask_with_groups);
-        if (p.scale_type == scale_type_t::MANY
-                && attr->output_scales_.mask_ == p.compensation_mask)
-            cs = ss;
-        else {
-            compute_strides(cs_, p.compensation_mask);
-            cs = cs_;
-        }
     }
 
     int ndims = 0;
@@ -260,7 +319,6 @@ status_t prb_init(prb_t &p, const memory_desc_t &imd, const memory_desc_t &omd,
             p.nodes[ndims].is = ild.strides[i_pos];
             p.nodes[ndims].os = old.strides[o_pos];
             p.nodes[ndims].ss = ss[o_pos];
-            p.nodes[ndims].cs = cs[o_pos];
             ++ndims;
             ++i_pos;
             ++o_pos;
@@ -268,7 +326,7 @@ status_t prb_init(prb_t &p, const memory_desc_t &imd, const memory_desc_t &omd,
             // old must be divisible by ild or we will not be
             // able to create valid nodes. The problem appears
             // when stag=Acdb48a and dtag=Acdb32a for example.
-            if (old.dims[o_pos] % ild.dims[i_pos] != 0)
+            if (ild.dims[i_pos] == 0 || old.dims[o_pos] % ild.dims[i_pos] != 0)
                 return status::unimplemented;
 
             int factor = old.dims[o_pos] / ild.dims[i_pos];
@@ -287,7 +345,6 @@ status_t prb_init(prb_t &p, const memory_desc_t &imd, const memory_desc_t &omd,
             p.nodes[ndims].is = ild.strides[i_pos];
             p.nodes[ndims].os = old.strides[o_pos] * factor;
             p.nodes[ndims].ss = ss[o_pos] * factor;
-            p.nodes[ndims].cs = cs[o_pos] * factor;
             ++ndims;
             ++i_pos;
             old.dims[o_pos] = factor;
@@ -296,7 +353,7 @@ status_t prb_init(prb_t &p, const memory_desc_t &imd, const memory_desc_t &omd,
             // ild must be divisible by old or we will not be
             // able to create valid nodes. The problem appears
             // when stag=Acdb32a and dtag=Acdb48a for example.
-            if (ild.dims[i_pos] % old.dims[o_pos] != 0)
+            if (old.dims[o_pos] == 0 || ild.dims[i_pos] % old.dims[o_pos] != 0)
                 return status::unimplemented;
 
             int factor = ild.dims[i_pos] / old.dims[o_pos];
@@ -308,7 +365,6 @@ status_t prb_init(prb_t &p, const memory_desc_t &imd, const memory_desc_t &omd,
             p.nodes[ndims].is = ild.strides[i_pos] * factor;
             p.nodes[ndims].os = old.strides[o_pos];
             p.nodes[ndims].ss = ss[o_pos];
-            p.nodes[ndims].cs = cs[o_pos];
             ++ndims;
             ++o_pos;
             ild.dims[i_pos] = factor;
@@ -323,6 +379,28 @@ status_t prb_init(prb_t &p, const memory_desc_t &imd, const memory_desc_t &omd,
 
     const int sum_idx = attr->post_ops_.find(primitive_kind::sum);
     p.beta = sum_idx == -1 ? 0.f : attr->post_ops_.entry_[sum_idx].sum.scale;
+
+    DEBUG({
+        printf("init : ");
+        prb_dump(prb);
+    });
+    // Sort the prb array in increasing sizes of the output stride
+    prb_normalize(p);
+    DEBUG({
+        printf("norm : ");
+        prb_dump(prb);
+    });
+
+    // compensation strides require prb_normalized
+    prb_set_compensation_strides(p);
+
+    /* Combine the variables, which appear together on both
+             * sides of the reorder */
+    prb_simplify(p);
+    DEBUG({
+        printf("smpl : ");
+        prb_dump(prb);
+    });
 
     return success;
 }

@@ -42,8 +42,8 @@ void check_correctness(const settings_t &s) {
         attr_t attr;
         attr.insert(i_scratchpad_mode);
 
-        const prb_t prb(s.dims, i_tag, i_stat_tag, i_dir, i_dt, i_flags, attr,
-                i_inplace, s.check_alg);
+        const prb_t prb(s.prb_dims, i_tag, i_stat_tag, i_dir, i_dt, i_flags,
+                attr, i_inplace, s.check_alg);
         std::stringstream ss;
         ss << prb;
         const std::string cpp_pstr = ss.str();
@@ -67,6 +67,11 @@ void check_correctness(const settings_t &s) {
     }
 }
 
+static const std::string help_flags
+        = "FLAGS    (Default: not specified)\n    Specifies normalization "
+          "flags. `FLAGS` values are:\n    * `G` for global_stats.\n    * `S` "
+          "for scaleshift.\n    * `C` for scale.\n    * `H` for shift.\n";
+
 int bench(int argc, char **argv) {
     driver_name = "lnorm";
     using namespace parser;
@@ -79,19 +84,19 @@ int bench(int argc, char **argv) {
                 || parse_dt(s.dt, def.dt, argv[0])
                 || parse_tag(s.tag, def.tag, argv[0])
                 || parse_tag(s.stat_tag, def.stat_tag, argv[0], "stat_tag")
-                || parse_vector_option(
-                        s.flags, def.flags, str2flags, argv[0], "flags")
+                || parse_vector_option(s.flags, def.flags, str2flags, argv[0],
+                        "flags", help_flags)
                 || parse_inplace(s.inplace, def.inplace, argv[0])
                 || parse_attr_scratchpad_mode(
                         s.scratchpad_mode, def.scratchpad_mode, argv[0])
                 || parse_test_pattern_match(s.pattern, argv[0])
                 || parse_perf_template(s.perf_template, s.perf_template_def,
                         s.perf_template_csv, argv[0])
-                || parse_reset(s, argv[0]);
+                || parse_reset(s, argv[0]) || parse_help(argv[0]);
         if (!parsed_options) {
             catch_unknown_options(argv[0]);
 
-            parse_dims(s.dims, argv[0]);
+            parse_prb_dims(s.prb_dims, argv[0]);
             check_correctness(s);
         }
     }

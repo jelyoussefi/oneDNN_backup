@@ -38,7 +38,7 @@ void check_correctness(const settings_t &s) {
         attr_t attr;
         attr.insert(i_scratchpad_mode);
 
-        const prb_t prb(s.dims, i_dir, i_dt, i_tag, i_axis, i_group, attr);
+        const prb_t prb(s.prb_dims, i_dir, i_dt, i_tag, i_axis, i_group, attr);
         std::stringstream ss;
         ss << prb;
         const std::string cpp_pstr = ss.str();
@@ -60,6 +60,10 @@ void check_correctness(const settings_t &s) {
     }
 }
 
+static const std::string help_group
+        = "UINT    (Default: `1`)\n    Specifies number of elements to "
+          "shuffle.\n";
+
 int bench(int argc, char **argv) {
     driver_name = "shuffle";
     using namespace parser;
@@ -72,17 +76,17 @@ int bench(int argc, char **argv) {
                 || parse_dt(s.dt, def.dt, argv[0])
                 || parse_tag(s.tag, def.tag, argv[0])
                 || parse_vector_option(
-                        s.group, def.group, atoi, argv[0], "group")
+                        s.group, def.group, atoi, argv[0], "group", help_group)
                 || parse_axis(s.axis, def.axis, argv[0])
                 || parse_attr_scratchpad_mode(
                         s.scratchpad_mode, def.scratchpad_mode, argv[0])
                 || parse_perf_template(s.perf_template, s.perf_template_def,
                         s.perf_template_csv, argv[0])
-                || parse_reset(s, argv[0]);
+                || parse_reset(s, argv[0]) || parse_help(argv[0]);
         if (!parsed_options) {
             catch_unknown_options(argv[0]);
 
-            parse_dims(s.dims, argv[0]);
+            parse_prb_dims(s.prb_dims, argv[0]);
             check_correctness(s);
         }
     }

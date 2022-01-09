@@ -19,10 +19,11 @@
 #include "common/c_types_map.hpp"
 #include "common/dnnl_traits.hpp"
 #include "common/float16.hpp"
+#include "common/impl_registration.hpp"
 #include "common/type_helpers.hpp"
 #include "gpu/jit/gemm/gemm_walk_orders.hpp"
 #include "gpu/jit/ngen_type_bridge.hpp"
-#include "gpu/ocl/gemm/xe_hp_systolic_gemm_copy_kernel.hpp"
+#include "gpu/ocl/gemm/xe_systolic_gemm_copy_kernel.hpp"
 
 namespace dnnl {
 namespace impl {
@@ -52,7 +53,8 @@ status_t xe_hp_systolic_gemm_t::pd_t::init(engine_t *engine) {
             && utils::one_of(d->c_type(), f32, d->a_type()));
 
     bool dt_int_ok = (utils::one_of(d->a_type(), u8, s8)
-            && utils::one_of(d->b_type(), u8, s8) && (d->c_type() == s32));
+            && utils::one_of(d->b_type(), u8, s8)
+            && utils::one_of(d->c_type(), s32, f32, s8, u8, f16));
 
     if (dt_int_ok) {
         if (attr()->zero_points_.defined(DNNL_ARG_SRC)) {
@@ -78,7 +80,7 @@ status_t xe_hp_systolic_gemm_t::pd_t::init(engine_t *engine) {
 
     CHECK(attr_.set_default_formats(dst_md(0)));
 
-    if (use_fma()) return status::unimplemented;
+    if (use_nocopy()) return status::unimplemented;
 
     // LIMITATIONS:
     // - batch is not supported for unpacked inputs.
@@ -98,7 +100,8 @@ status_t xe_hp_systolic_gemm_t::pd_t::init(engine_t *engine) {
 
     if (dt_int_ok) attr_skip_mask |= smask_t::zero_points_runtime;
 
-    bool arch_ok = (arch == arch_t::xe_hp) | (arch == arch_t::xe_hpg);
+    bool arch_ok = utils::one_of(
+            arch, arch_t::xe_hp, arch_t::xe_hpg, arch_t::xe_hpc);
 
     ok = true && limits_ok && (dt_float_ok || dt_int_ok) && arch_ok
             && compute_engine->mayiuse(compute::device_ext_t::
@@ -106,7 +109,7 @@ status_t xe_hp_systolic_gemm_t::pd_t::init(engine_t *engine) {
             && attr()->has_default_values(attr_skip_mask)
             && attr()->output_scales_.mask_ == 0 && attr()->post_ops_.len() <= 2
             && IMPLICATION(with_bias(),
-                    dt_float_ok
+                    (dt_float_ok || dt_int_ok)
                             && utils::one_of(d->bias_type(), d->a_type(), f32)
                             && utils::one_of(bias_cmask(), 0, 1 << 0, 1 << 1));
 
@@ -130,6 +133,8 @@ status_t xe_hp_systolic_gemm_t::pd_t::init(engine_t *engine) {
         attr()->zero_points_.get(DNNL_ARG_DST, nullptr, &cmask_c, nullptr);
         ok &= (cmask_a == 0) && (cmask_b == 0)
                 && utils::one_of(cmask_c, 0, 1 << 0, 1 << 1);
+        ok &= IMPLICATION(utils::one_of(d->c_type(), f32, s8, u8, f16),
+                (attr()->post_ops_.len() == 0) && use_new_kernels());
     }
 
     if (!ok) return status::unimplemented;
@@ -138,13 +143,15 @@ status_t xe_hp_systolic_gemm_t::pd_t::init(engine_t *engine) {
 }
 
 namespace {
+// Use no-copy if m*n < mn_limit * mn_limit and k < k_limit.
+// Zero means no limit.
 struct nocopy_table_t {
-    int mn_limit[2][2]; // Use no-copy if m*n < mn_limit * mn_limit and
-    int k_limit[2][2]; // Use no-copy if k < k_limit
+    int mn_limit[2][2];
+    int k_limit[2][2];
 };
 
 const nocopy_table_t xe_hp_f16_nocopy_table[] = {
-        // NN     NT     TN    TT
+        // NN    NT     TN   TT
         {{{1280, 768}, {512, 384}}, {{512, 768}, {1024, 512}}}};
 
 const nocopy_table_t xe_hp_bf16_nocopy_table[] = {
@@ -154,31 +161,71 @@ const nocopy_table_t xe_hp_bf16_nocopy_table[] = {
 const nocopy_table_t xe_hp_x8x8s32_nocopy_table[] = {
         // NN   NT     TN   TT
         {{{384, 384}, {384, 384}}, {{384, 512}, {384, 256}}}};
+
+const nocopy_table_t xe_hpc_f16_nocopy_table[] = {
+        // NN    NT   TN   TT
+        {{{0, 1024}, {2048, 0}}, {{0, 0}, {0, 0}}}};
+
+const nocopy_table_t xe_hpc_bf16_nocopy_table[] = {
+        // NN    NT   TN   TT
+        {{{0, 1024}, {2048, 0}}, {{0, 0}, {0, 0}}}};
+
+const nocopy_table_t xe_hpc_x8x8s32_nocopy_table[] = {
+        // NN    NT      TN    TT
+        {{{1024, 1024}, {1024, 1024}}, {{0, 0}, {0, 0}}}};
+
+const nocopy_table_t xe_hpc_f16_nocopy_bad_ld_table[] = {
+        // NN    NT      TN    TT
+        {{{1024, 1024}, {1024, 1024}}, {{0, 0}, {0, 0}}}};
+
+const nocopy_table_t xe_hpc_bf16_nocopy_bad_ld_table[] = {
+        // NN    NT      TN    TT
+        {{{1024, 1024}, {1024, 1024}}, {{0, 0}, {0, 0}}}};
+
+const nocopy_table_t xe_hpc_x8x8s32_nocopy_bad_ld_table[] = {
+        // NN    NT      TN    TT
+        {{{1024, 1024}, {1024, 1024}}, {{0, 0}, {0, 0}}}};
 } // namespace
 
-bool xe_hp_systolic_gemm_t::pd_t::use_fma() {
+bool xe_hp_systolic_gemm_t::pd_t::use_nocopy() {
     using namespace data_type;
 
     const auto &d = desc();
+    bool xehpc = (dev_info_->gpu_arch() == compute::gpu_arch_t::xe_hpc);
 
-    if (any_prepacked_) return false;
+    if (any_prepacked_ || (packed_a_ && packed_b_)) return false;
 
-    // Use FMA implementation if one matrix is very small.
+    // Use no-copy implementation if one matrix is very small.
     if (d->m() < 32 && d->n() < 32) return true;
     if (d->m() < 32 && d->k() < 32) return true;
     if (d->n() < 32 && d->k() < 32) return true;
 
-    // Use FMA for small/medium sizes.
-    if (utils::one_of(d->c_type(), bf16, f16, s32)) {
-        const nocopy_table_t *all_tables[3] = {xe_hp_f16_nocopy_table,
-                xe_hp_bf16_nocopy_table, xe_hp_x8x8s32_nocopy_table};
-        const int type_idx
-                = (d->c_type() == f16) ? 0 : (d->c_type() == bf16) ? 1 : 2;
-        const nocopy_table_t *table = all_tables[type_idx];
-        const long mnl = table->mn_limit[d->transa()][d->transb()];
-        const long kl = table->k_limit[d->transa()][d->transb()];
+    // Use no-copy for small/medium sizes.
+    if (utils::one_of(d->a_type(), bf16, f16, s8, u8)) {
+        // clang-format off
+        const nocopy_table_t *all_tables[2][2][3] = {
+            {{xe_hp_f16_nocopy_table, xe_hp_bf16_nocopy_table, xe_hp_x8x8s32_nocopy_table},
+             {xe_hp_f16_nocopy_table, xe_hp_bf16_nocopy_table, xe_hp_x8x8s32_nocopy_table}},
+            {{xe_hpc_f16_nocopy_table, xe_hpc_bf16_nocopy_table, xe_hpc_x8x8s32_nocopy_table},
+             {xe_hpc_f16_nocopy_bad_ld_table, xe_hpc_bf16_nocopy_bad_ld_table, xe_hpc_x8x8s32_nocopy_bad_ld_table}}
+        };
+        // clang-format on
+        int type_idx = (d->a_type() == f16) ? 0 : (d->a_type() == bf16) ? 1 : 2;
+        int arch_idx = xehpc ? 1 : 0;
+        bool bad_ld = false;
 
-        if ((d->m() * d->n() < mnl * mnl) && (d->k() < kl)) return true;
+        auto lda_bytes = d->lda() * types::data_type_size(d->a_type());
+        auto ldb_bytes = d->ldb() * types::data_type_size(d->b_type());
+        if (!packed_a_) bad_ld |= ((lda_bytes & 0xF) != 0);
+        if (!packed_b_) bad_ld |= ((ldb_bytes & 0xF) != 0);
+
+        auto table = all_tables[arch_idx][int(bad_ld)][type_idx];
+        long mnl = table->mn_limit[d->transa()][d->transb()];
+        long kl = table->k_limit[d->transa()][d->transb()];
+
+        if ((mnl == 0 || d->m() * d->n() < mnl * mnl)
+                && (kl == 0 || d->k() < kl))
+            return true;
     }
 
     return false;
@@ -186,7 +233,7 @@ bool xe_hp_systolic_gemm_t::pd_t::use_fma() {
 
 bool xe_hp_systolic_gemm_t::pd_t::set_default_formats(data_type_t dt) {
     using namespace format_tag;
-    using new_kernel_t = gen_gemm_xehp_systolic_kernel_t;
+    using new_kernel_t = gen_gemm_xe_systolic_kernel_t;
 
     auto sz = types::data_type_size(dt);
     const auto &d = desc();
@@ -201,41 +248,67 @@ bool xe_hp_systolic_gemm_t::pd_t::set_default_formats(data_type_t dt) {
     bool c_any = c_mdw.format_any();
     bool batch = d->is_batched();
 
-    format_tag_t a_packed_tag = batch ? ((sz == 2) ? aCB4c8b8c2b : aCB4c8b8c4b)
-                                      : ((sz == 2) ? BA4b8a8b2a : BA4b8a8b4a);
-    format_tag_t b_packed_tag_48 = batch ? ((sz == 2) ? aBC48b16c : aBC48b32c)
-                                         : ((sz == 2) ? AB48a16b : AB48a32b);
-    format_tag_t b_packed_tag_32 = batch ? ((sz == 2) ? aBC32b16c : aBC32b32c)
-                                         : ((sz == 2) ? AB32a16b : AB32a32b);
+    format_tag_t a_packed_tag_16 = undef;
+    format_tag_t a_packed_tag_32 = undef;
+    format_tag_t a_packed_tag_64 = undef;
+    format_tag_t b_packed_tag_16 = undef;
+    format_tag_t b_packed_tag_32 = undef;
+    format_tag_t b_packed_tag_48 = undef;
     format_tag_t unpacked_tag = batch ? abc : ab;
 
-    bool a_prepacked = a_mdw.matches_tag(a_packed_tag);
+    if (arch == compute::gpu_arch_t::xe_hpc) {
+        a_packed_tag_64 = batch ? ((sz == 2) ? aCB4c8b16c2b : aCB4c8b16c4b)
+                                : ((sz == 2) ? BA4b8a16b2a : BA4b8a16b4a);
+        a_packed_tag_16 = batch ? ((sz == 2) ? aCB16c2b : aCB16c4b)
+                                : ((sz == 2) ? BA16b2a : BA16b4a);
+        b_packed_tag_16 = batch ? ((sz == 2) ? aBC16b16c : aBC16b32c)
+                                : ((sz == 2) ? AB16a16b : AB16a32b);
+    } else {
+        a_packed_tag_32 = batch ? ((sz == 2) ? aCB4c8b8c2b : aCB4c8b8c4b)
+                                : ((sz == 2) ? BA4b8a8b2a : BA4b8a8b4a);
+        b_packed_tag_48 = batch ? ((sz == 2) ? aBC48b16c : aBC48b32c)
+                                : ((sz == 2) ? AB48a16b : AB48a32b);
+    }
+    b_packed_tag_32 = batch ? ((sz == 2) ? aBC32b16c : aBC32b32c)
+                            : ((sz == 2) ? AB32a16b : AB32a32b);
+
+    bool a_prepacked_16 = a_mdw.matches_tag(a_packed_tag_16);
+    bool a_prepacked_32 = a_mdw.matches_tag(a_packed_tag_32);
+    bool a_prepacked_64 = a_mdw.matches_tag(a_packed_tag_64);
+    bool bc_prepacked_16 = b_mdw.matches_tag(b_packed_tag_16)
+            || c_mdw.matches_tag(b_packed_tag_16);
     bool bc_prepacked_32 = b_mdw.matches_tag(b_packed_tag_32)
             || c_mdw.matches_tag(b_packed_tag_32);
     bool bc_prepacked_48 = b_mdw.matches_tag(b_packed_tag_48)
             || c_mdw.matches_tag(b_packed_tag_48);
-    bool c_prepacked = c_mdw.matches_tag(b_packed_tag_32)
-            || c_mdw.matches_tag(b_packed_tag_48);
 
-    any_prepacked_ = a_prepacked || bc_prepacked_32 || bc_prepacked_48;
+    any_prepacked_ = a_prepacked_16 || a_prepacked_32 || a_prepacked_64
+            || bc_prepacked_16 || bc_prepacked_32 || bc_prepacked_48;
 
-    unroll_m_ = 32;
+    unroll_m_ = 0;
     unroll_n_ = 0;
     kernel_tag_ = 0;
-    if (bc_prepacked_32)
-        unroll_n_ = 32;
-    else if (bc_prepacked_48)
-        unroll_n_ = 48;
+    if (a_prepacked_16) unroll_m_ = 16;
+    if (a_prepacked_32) unroll_m_ = 32;
+    if (a_prepacked_64) unroll_m_ = 64;
+    if (bc_prepacked_16) unroll_n_ = 16;
+    if (bc_prepacked_32) unroll_n_ = 32;
+    if (bc_prepacked_48) unroll_n_ = 48;
 
-    use_new_kernels_ = !c_prepacked && !with_ab_zero_points() && (d->k() >= 64);
+    use_new_kernels_ = !with_ab_zero_points() && (d->k() >= 64);
+    use_new_kernels_ |= (arch >= compute::gpu_arch_t::xe_hpc);
 
     new_kernel_t::choose_unrolls(arch, dev_info_->eu_count(), d->a_type(),
             d->b_type(), d->c_type(), d->m(), d->n(), d->k(), d->batch(),
             unroll_m_, unroll_n_, kernel_tag_);
 
-    format_tag_t b_packed_tag
-            = (unroll_n_ == 48) ? b_packed_tag_48 : b_packed_tag_32;
-    format_tag_t c_packed_tag = use_new_kernels_ ? unpacked_tag : b_packed_tag;
+    format_tag_t a_packed_tag = (unroll_m_ == 64)
+            ? a_packed_tag_64
+            : (unroll_m_ == 32) ? a_packed_tag_32 : a_packed_tag_16;
+    format_tag_t b_packed_tag = (unroll_n_ == 48)
+            ? b_packed_tag_48
+            : (unroll_n_ == 32) ? b_packed_tag_32 : b_packed_tag_16;
+    format_tag_t c_packed_tag = b_packed_tag;
 
     packed_a_ = packed_b_ = packed_c_ = false;
 
@@ -254,10 +327,12 @@ bool xe_hp_systolic_gemm_t::pd_t::set_default_formats(data_type_t dt) {
     if (b_any) {
         CHECK(memory_desc_init_by_tag(
                 desc_.a_desc, a_zp_ ? unpacked_tag : b_packed_tag));
-        auto &ld = desc_.a_desc.padded_dims[batch ? 2 : 1];
-        ld = nice_ld(ld, int(sz));
-        desc_.a_desc.format_desc.blocking.strides[batch ? 1 : 0]
-                = unroll_n_ * ld;
+        if (unroll_n_ > 16) { // Bug in zero-padding when unroll_n_ == 16
+            auto &ld = desc_.a_desc.padded_dims[batch ? 2 : 1];
+            ld = nice_ld(ld, int(sz));
+            desc_.a_desc.format_desc.blocking.strides[batch ? 1 : 0]
+                    = unroll_n_ * ld;
+        }
         packed_b_ = true;
     } else if (b_mdw.matches_one_of_tag(b_packed_tag, ab, ba, abc, acb)
             == undef)
@@ -271,6 +346,10 @@ bool xe_hp_systolic_gemm_t::pd_t::set_default_formats(data_type_t dt) {
     packed_a_ = packed_a_ || a_mdw.matches_tag(a_packed_tag);
     packed_b_ = packed_b_ || b_mdw.matches_tag(b_packed_tag);
     packed_c_ = c_mdw.matches_tag(b_packed_tag);
+
+    // No 16x16 copy kernels currently.
+    if ((!packed_a_ && unroll_m_ == 16) || (!packed_b_ && unroll_n_ == 16))
+        return false;
 
     return gpu_gemm_pd_t::set_default_formats();
 }
@@ -299,7 +378,7 @@ status_t xe_hp_systolic_gemm_t::init(engine_t *engine) {
 
     if (get_verbose() >= 2) {
         char tag_s[2] = {pd()->kernel_tag(), 0};
-        printf("dnnl_verbose,info,gpu,gemm,kernel:%dx%d,%s,new:%c\n",
+        printf("onednn_verbose,info,gpu,gemm,kernel:%dx%d,%s,new:%c\n",
                 pd()->unroll_m(), pd()->unroll_n(), tag_s,
                 pd()->use_new_kernels() ? 'Y' : 'N');
     }
@@ -317,19 +396,18 @@ status_t xe_hp_systolic_gemm_t::init(engine_t *engine) {
             if (clear_sum && !pd()->with_ab_zero_points()) continue;
             if (!copy_b ? pd()->packed_a() : pd()->packed_b()) continue;
 
+            using copy_kernel_t = ocl::xe_systolic_gemm_copy_kernel_t;
             compute::kernel_ctx_t kernel_ctx;
 
             auto trans
                     = !copy_b ? pd()->desc()->transa() : pd()->desc()->transb();
-            auto status
-                    = ocl::xe_hp_systolic_gemm_copy_kernel_t::init_kernel_ctx(
-                            kernel_ctx, !copy_b ? a_type : b_type,
-                            pd()->unroll_n(), copy_b, trans,
-                            pd()->with_ab_zero_points(), clear_sum);
+            auto status = copy_kernel_t::init_kernel_ctx(kernel_ctx, arch_,
+                    !copy_b ? a_type : b_type, pd()->unroll_n(), copy_b, trans,
+                    pd()->with_ab_zero_points(), clear_sum);
             if (status != status::success) return status;
 
             create_kernel(engine, &copy_kernel_[copy_b][clear_sum],
-                    "xe_hp_systolic_gemm_copy", kernel_ctx);
+                    copy_kernel_t::name(arch_), kernel_ctx);
             if (!copy_kernel_[copy_b][clear_sum]) return status::runtime_error;
         }
     }
@@ -382,6 +460,7 @@ status_t xe_hp_systolic_gemm_t::init_compute_old(engine_t *engine) {
 
     bool may_k_block = (pd()->desc()->k() > kernel_t::min_block_k(a_type));
     bool got_info = false;
+    UNUSED(got_info); // If none of supported archs were selected by user.
 
     for (bool first_k_block : {false, true}) {
         for (bool last_k_block : {false, true}) {
@@ -406,34 +485,38 @@ status_t xe_hp_systolic_gemm_t::init_compute_old(engine_t *engine) {
                 }
 
                 switch (arch_) {
-                    case arch_t::xe_hp: {
-                        auto kernel = kernel_t(cfg_copy);
+                    case arch_t::xe_hp:
+                        REG_XEHP_ISA({
+                            auto kernel = kernel_t(cfg_copy);
 
-                        create_kernel(engine,
-                                &kernel_[first_k_block][last_k_block], kernel);
+                            create_kernel(engine,
+                                    &kernel_[first_k_block][last_k_block],
+                                    &kernel);
 
-                        if (!got_info) {
-                            compute_info_ = kernel.driver_info(eu_count_);
-                            got_info = true;
-                        }
+                            if (!got_info) {
+                                compute_info_ = kernel.driver_info(eu_count_);
+                                got_info = true;
+                            }
+                        });
                         break;
-                    }
-                    case arch_t::xe_hpg: {
-                        using kernel_xe_hpg_t
-                                = xehp_systolic_gemm_kernel_t<gpu_xe_hpg>;
-                        cfg_copy.emulate64 = true;
-                        auto kernel = kernel_xe_hpg_t(
-                                cfg_copy.cast<kernel_xe_hpg_t::config_t>());
+                    case arch_t::xe_hpg:
+                        REG_XEHPG_ISA({
+                            using kernel_xe_hpg_t
+                                    = xehp_systolic_gemm_kernel_t<gpu_xe_hpg>;
+                            cfg_copy.emulate64 = true;
+                            auto kernel = kernel_xe_hpg_t(
+                                    cfg_copy.cast<kernel_xe_hpg_t::config_t>());
 
-                        create_kernel(engine,
-                                &kernel_[first_k_block][last_k_block], kernel);
+                            create_kernel(engine,
+                                    &kernel_[first_k_block][last_k_block],
+                                    &kernel);
 
-                        if (!got_info) {
-                            compute_info_ = kernel.driver_info(eu_count_);
-                            got_info = true;
-                        }
+                            if (!got_info) {
+                                compute_info_ = kernel.driver_info(eu_count_);
+                                got_info = true;
+                            }
+                        });
                         break;
-                    }
                     default:
                         assert(!"Unsupported GPU architecture.");
                         return status::unimplemented;
@@ -450,13 +533,13 @@ status_t xe_hp_systolic_gemm_t::init_compute_old(engine_t *engine) {
 }
 
 status_t xe_hp_systolic_gemm_t::init_compute_new(engine_t *engine) {
-    using kernel_t = gen_gemm_xehp_systolic_kernel_t;
+    using kernel_t = gen_gemm_xe_systolic_kernel_t;
     using offset_t = kernel_t::offset_t;
 
     auto a_type = pd()->desc()->a_type();
     auto b_type = pd()->desc()->b_type();
     auto c_type = pd()->desc()->c_type();
-    auto co_type = pd()->with_bias() ? pd()->desc()->bias_type() : c_type;
+    auto co_type = pd()->impl_co_type();
     auto acc_type = pd()->impl_acc_type();
 
     offset_t ab_offset
@@ -499,8 +582,8 @@ status_t xe_hp_systolic_gemm_t::init_compute_new(engine_t *engine) {
                 auto status = kernel.init(arch_, pd()->with_batch(), ab_offset,
                         ab_offset, this_c_offset, bias_offset, pd()->alpha(),
                         this_beta, *this_post_ops, a_type, b_type, c_type,
-                        co_type, acc_type, pd()->unroll_m(), pd()->unroll_n(),
-                        pd()->kernel_tag());
+                        co_type, acc_type, pd()->packed_c(), pd()->unroll_m(),
+                        pd()->unroll_n(), pd()->kernel_tag());
 
                 if (status != status::success) return status;
 
@@ -510,7 +593,7 @@ status_t xe_hp_systolic_gemm_t::init_compute_new(engine_t *engine) {
                 }
 
                 create_kernel(
-                        engine, &kernel_[first_k_block][last_k_block], kernel);
+                        engine, &kernel_[first_k_block][last_k_block], &kernel);
 
                 if (!kernel_[first_k_block][last_k_block])
                     return status::runtime_error;
@@ -621,7 +704,7 @@ status_t xe_hp_systolic_gemm_t::launch_copy(const gemm_exec_ctx_t &ctx,
         int64_t ld_src, const memory_storage_t &dst, int32_t offset_dst,
         int32_t ld_dst, bool copyb) const {
 
-    using copy_kernel_t = ocl::xe_hp_systolic_gemm_copy_kernel_t;
+    using copy_kernel_t = ocl::xe_systolic_gemm_copy_kernel_t;
 
     if (pd()->with_ab_zero_points()) {
         auto status
@@ -660,10 +743,12 @@ status_t xe_hp_systolic_gemm_t::launch_copy(const gemm_exec_ctx_t &ctx,
 
     auto elt_size = types::data_type_size(pd()->desc()->a_type());
     size_t r_threads = utils::div_up(utils::rnd_up(r, align_r),
-            copy_kernel_t::unroll_r(elt_size, pd()->unroll_n(), copyb, trans));
+            copy_kernel_t::unroll_r(
+                    arch_, elt_size, pd()->unroll_n(), copyb, trans));
     size_t c_threads = utils::div_up(utils::rnd_up(c, align_c),
-            copy_kernel_t::unroll_c(elt_size, pd()->unroll_n(), copyb, trans));
-    size_t sg = copy_kernel_t::subgroup_size(elt_size, copyb, trans);
+            copy_kernel_t::unroll_c(
+                    arch_, elt_size, pd()->unroll_n(), copyb, trans));
+    size_t sg = copy_kernel_t::subgroup_size(arch_, elt_size, copyb, trans);
 
     size_t r_lsz = trans ? 1 : 16;
     size_t c_lsz = trans ? 16 : 1;
@@ -703,8 +788,8 @@ status_t xe_hp_systolic_gemm_t::launch_clear_sum(const gemm_exec_ctx_t &ctx,
     auto elt_size = types::data_type_size(pd()->desc()->a_type());
     size_t threads = !copyb ? utils::div_up(r, pd()->unroll_m())
                             : utils::div_up(c, pd()->unroll_n());
-    size_t sg = ocl::xe_hp_systolic_gemm_copy_kernel_t::subgroup_size_clear_sum(
-            elt_size, copyb);
+    size_t sg = ocl::xe_systolic_gemm_copy_kernel_t::subgroup_size_clear_sum(
+            arch_, elt_size, copyb);
 
     size_t gws[3] = {threads * sg, 1, 1};
     size_t lws[3] = {sg, 1, 1};

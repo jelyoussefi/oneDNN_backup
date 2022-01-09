@@ -55,9 +55,9 @@ jit_avx512_core_x8s8s32x_deconv_fwd_kernel<Vmm>::
         static constexpr bool use_exact_tail_scalar_bcast = false;
 
         const binary_injector::rhs_arg_static_params_t rhs_sp {
-                static_cast<size_t>(Xbyak::Xmm(31).getIdx()), this->rdx,
-                this->r14, preserve_gpr, preserve_vmm,
-                GET_OFF(post_ops_binary_rhs_arg_vec),
+                static_cast<size_t>(Xbyak::Xmm(31).getIdx()), this->r14,
+                this->r15, preserve_gpr, preserve_vmm,
+                GET_OFF(post_ops_binary_rhs_arg_vec), GET_OFF(dst_orig),
                 memory_desc_wrapper(dst_md), tail_size, ktail_mask,
                 use_exact_tail_scalar_bcast};
         const binary_injector::static_params_t bsp {this->param1, rhs_sp};
@@ -1018,10 +1018,14 @@ void jit_avx512_core_x8s8s32x_deconv_fwd_kernel<Vmm>::store_output(
                         = last_oc_block && ocb == jcp.nb_oc_blocking - 1;
                 for (int ur = 0; ur < ur_w; ur++) {
                     const int vmm_idx = vmm_out(ur, ocb).getIdx();
-                    rhs_arg_params.vmm_idx_to_oc_elem_off_addr.emplace(
-                            vmm_idx, ptr[param1 + GET_OFF(oc_l_off)]);
-                    rhs_arg_params.vmm_idx_to_oc_elem_off_val.emplace(
-                            vmm_idx, ocb * jcp.oc_block);
+                    const size_t aux_output_offset = jcp.typesize_out
+                            * (ocb * jcp.oc_block
+                                    + ur * jcp.oc_without_padding
+                                            * jcp.ngroups);
+
+                    rhs_arg_params.vmm_idx_to_out_reg.emplace(vmm_idx, reg_dst);
+                    rhs_arg_params.vmm_idx_to_out_elem_off_val.emplace(
+                            vmm_idx, aux_output_offset);
                     if (mask_flag)
                         rhs_arg_params.vmm_tail_idx_.emplace(vmm_idx);
                 }
@@ -1121,10 +1125,13 @@ void jit_avx512_core_x8s8s32x_deconv_fwd_kernel<Vmm>::icb_loop(
 
     mov(reg_icb, jcp.nb_ic);
 
-    if (zp::should_calculate_deconv_zp_src_pad_str_comp(jcp) && jcp.ndims > 3) {
+    if (zp::should_calculate_deconv_zp_src_pad_str_comp(jcp)) {
         mov(reg_oc_blocks, ptr[param1 + GET_OFF(oc_blocks)]);
-        mov(reg_scratch, qword[param1 + GET_OFF(zp_src_pad_str_compensation)]);
-        mov(zp_src_pad_comp_addr, reg_scratch);
+        if (jcp.ndims > 3) {
+            mov(reg_scratch,
+                    qword[param1 + GET_OFF(zp_src_pad_str_compensation)]);
+            mov(zp_src_pad_comp_addr, reg_scratch);
+        }
     }
 
     L(icb_loop_label);
@@ -1401,14 +1408,14 @@ status_t jit_avx512_core_x8s8s32x_deconvolution_fwd_t::execute_forward_1d(
         }
         oscales = local_scales;
     }
-    size_t offset = (size_t)jcp.ngroups * jcp.oc * jcp.ic * jcp.kh * jcp.kw;
+    const size_t offset = weights_d.size() - weights_d.additional_buffer_size();
     auto w = const_cast<int8_t *>(weights);
     int32_t *compensation = (jcp.signed_input)
             ? reinterpret_cast<int32_t *>(&w[offset])
             : nullptr;
     const int32_t *zp_compensation = jcp.src_zero_point
-            ? get_src_zp_comp_from_wei(weights, weights_d, jcp.signed_input,
-                    jcp.ngroups, jcp.oc_without_padding)
+            ? get_src_zp_comp_from_wei(
+                    weights, weights_d, jcp.signed_input, jcp.ngroups, jcp.oc)
             : nullptr;
 
     parallel(jcp.nthr, [&](const int ithr, const int nthr) {
@@ -1451,6 +1458,7 @@ status_t jit_avx512_core_x8s8s32x_deconvolution_fwd_t::execute_forward_1d(
                     = jcp.src_zero_point ? zp_src_comp_scratch + g_oc : nullptr;
             p.src_zero_point = zp_src;
             p.dst_zero_point = zp_dst;
+            p.dst_orig = dst;
             (*kernel_)(&p);
 
             ++start;
@@ -1514,14 +1522,14 @@ status_t jit_avx512_core_x8s8s32x_deconvolution_fwd_t::execute_forward_2d(
         }
         oscales = local_scales;
     }
-    size_t offset = (size_t)jcp.ngroups * jcp.oc * jcp.ic * jcp.kh * jcp.kw;
+    const size_t offset = weights_d.size() - weights_d.additional_buffer_size();
     auto w = const_cast<int8_t *>(weights);
     int32_t *compensation = (jcp.signed_input)
             ? reinterpret_cast<int32_t *>(&w[offset])
             : nullptr;
     const int32_t *zp_compensation = jcp.src_zero_point
-            ? get_src_zp_comp_from_wei(weights, weights_d, jcp.signed_input,
-                    jcp.ngroups, jcp.oc_without_padding)
+            ? get_src_zp_comp_from_wei(
+                    weights, weights_d, jcp.signed_input, jcp.ngroups, jcp.oc)
             : nullptr;
 
     parallel(jcp.nthr, [&](const int ithr, const int nthr) {
@@ -1623,6 +1631,7 @@ status_t jit_avx512_core_x8s8s32x_deconvolution_fwd_t::execute_forward_2d(
                         : nullptr;
                 p.src_zero_point = zp_src;
                 p.dst_zero_point = zp_dst;
+                p.dst_orig = dst;
 
                 (*kernel_)(&p);
             }
@@ -1697,8 +1706,8 @@ status_t jit_avx512_core_x8s8s32x_deconvolution_fwd_t::execute_forward_3d(
             ? reinterpret_cast<int32_t *>(&w[offset])
             : nullptr;
     const int32_t *zp_compensation = jcp.src_zero_point
-            ? get_src_zp_comp_from_wei(weights, weights_d, jcp.signed_input,
-                    jcp.ngroups, jcp.oc_without_padding)
+            ? get_src_zp_comp_from_wei(
+                    weights, weights_d, jcp.signed_input, jcp.ngroups, jcp.oc)
             : nullptr;
 
     parallel(jcp.nthr, [&](const int ithr, const int nthr) {
@@ -1852,6 +1861,7 @@ status_t jit_avx512_core_x8s8s32x_deconvolution_fwd_t::execute_forward_3d(
                         : nullptr;
                 p.src_zero_point = zp_src;
                 p.dst_zero_point = zp_dst;
+                p.dst_orig = dst;
                 (*kernel_)(&p);
             }
             if (jcp.loop_order == loop_ngc)

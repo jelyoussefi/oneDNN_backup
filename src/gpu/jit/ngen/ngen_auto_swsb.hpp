@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2019-2021 Intel Corporation
+* Copyright 2019-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -26,8 +26,8 @@
 #include <iostream>
 #endif
 
-#include <list>
 #include <limits>
+#include <list>
 #include <map>
 
 namespace ngen {
@@ -44,14 +44,16 @@ enum {
     PipeMaskF = 2,
     PipeMaskI = 4,
     PipeMaskL = 8,
-    PipeMaskO = 0x10,   // All out-of-order pipes. Not a valid GeneralizedPipe.
+    PipeMaskM = 0x10,
+    PipeMaskO = 0x20,   // All out-of-order pipes. Not a valid GeneralizedPipe.
     PipeBitA = 0,
     PipeBitF = 1,
     PipeBitI = 2,
     PipeBitL = 3,
-    PipeBitO = 4,
+    PipeBitM = 4,
+    PipeBitO = 5,
 };
-static constexpr int NPipes = 4;
+static constexpr int NPipes = 5;
 
 static inline PipeMask toMask(Pipe pipe)   { return (1 << (static_cast<unsigned>(pipe) - 1)); }
 static inline Pipe fromMask(PipeMask mask) { return mask ? static_cast<Pipe>(1 + utils::log2(mask)) : Pipe::Default; }
@@ -102,7 +104,7 @@ struct DependencyRegion {
     uint8_t unspecified : 1;
     uint8_t checkWAW : 1;
     HW hw;
-    std::array<uint32_t, 16> masks;
+    std::array<uint32_t, 32> masks;
 
     DependencyRegion() : DependencyRegion(HW::Unknown) {}
     explicit DependencyRegion(HW hw_) : base(0), size(0), unspecified{true}, checkWAW{false}, hw{hw_} {
@@ -143,13 +145,15 @@ struct Dependency {
     uint8_t tokenDst : 1;                               // Dst dependency on token?
     uint8_t rw : 1;                                     // Flag: read or write?
     uint8_t swsb : 1;                                   // True for SWSB dependency consumers
+    uint8_t active : 1;                                 // True if dependency is still alive.
     PipeMask depPipe;                                   // (swsb consumer only) Pipe to wait on
     uint8_t dist;                                       // (swsb consumer only) Pipe distance
     DependencyRegion region;                            // GRF region covered
 
     Dependency() : label{0}, pipe{}, tokenTime{0},
         token{0}, tokenSrc{false}, tokenDst{false},
-        rw{false}, swsb{false}, depPipe{PipeMaskNone}, dist{0}, region{} { counters.fill(0); }
+        rw{false}, swsb{false}, active{true},
+        depPipe{PipeMaskNone}, dist{0}, region{} { counters.fill(0); }
 
     bool operator==(const Dependency &other) {
         return !std::memcmp(this, &other, sizeof(Dependency));
@@ -164,7 +168,7 @@ struct Dependency {
     constexpr bool hasToken() const { return tokenSrc || tokenDst; }
     constexpr bool hasDist() const  { return (dist > 0); }
 
-    Dependency<!consumer>& cast()   { return *reinterpret_cast<Dependency<!consumer>*>(this); }
+    Dependency<!consumer>& cast()   { return reinterpret_cast<Dependency<!consumer>&>(*this); }
 
     static constexpr uint8_t tokenTBD = 0xFF;
 
@@ -175,24 +179,61 @@ struct Dependency {
 
 template <bool consumer>
 class DependencyTable {
-    std::list<Dependency<consumer>> deps;
+    enum {
+        ListTypeGRF = 0,                    // Lists of DependencyFragments filtered by GRF base register.
+        ListTypeToken = 1,                  // Lists of DependencyFragments filtered by token.
+        ListTypePipe = 2,                   // Lists of DependencyFragments filtered by (in-order) pipe.
+                                            //   fragsByToken/fragsByPipe contain only one DependencyFragment per Dependency.
+        NListTypes = 3
+    };
+
+    enum : uint32_t {
+        none = ~uint32_t(0)                 // Special value indicating end of list.
+    };
+
+    enum : int {
+        grfListIdxUnspecified = 256         // GRF list index for all unspecified regions.
+    };
+
+    struct DependencyFragment {
+        uint32_t depID;                     // Index of main Dependency struct in array.
+        uint8_t before, after;              // # of consecutive fragments associated with the same Dependency
+                                            //  before and after this one.
+        uint32_t prev[NListTypes];          // Previous pointers for doubly-linked lists.
+        uint32_t next[NListTypes];          // Next pointers for doubly-linked lists.
+    };
+
+    std::vector<Dependency<consumer>> deps;         // List of all Dependencies (active or not)
+    std::vector<DependencyFragment> frags;          // List of all DependencyFragments (active or not)
+    std::array<uint32_t, 257> heads[NListTypes];    // Heads of doubly-linked lists.
+
+    static bool isHeadLink(uint32_t id)         { return ((id & 0x80000000) != 0) && (id != none); }
+    static uint32_t readHeadLink(uint32_t id)   { return id & 0x7FFFFFFF; }
+    static uint32_t makeHeadLink(uint32_t idx)  { return idx | 0x80000000; }
+
+    template <bool iconsumer> inline void findAndRemoveIntersections(int listType, int listIdx, const Dependency<iconsumer> &dep, std::vector<Dependency<consumer>> *out, bool doRemove = true);
+    inline bool insertPrepare(int listType, int listIdx, Dependency<consumer> &dep, bool checkWeaker, bool checkStronger);
+    inline void insertLinkedList(int listType, int listIdx, int32_t fragID);
+
+    template <bool iconsumer> static inline int getPipeIndex(const Dependency<iconsumer> &dep);
 
 public:
-    void clear()                                                        { deps.clear(); }
+    DependencyTable() { clear(); }
+
+    inline void clear();
+    inline void reserve(int icount);
     inline bool insert(Dependency<consumer> &dep, bool checkWeaker = true, bool checkStronger = true);
     inline bool insertWeak(Dependency<consumer> &dep)                   { return insert(dep, true, false); }
     inline void insertStrong(const Dependency<consumer> &dep)           { (void) insert(const_cast<Dependency<consumer> &>(dep), false, true); }
-    inline void remove(const Dependency<consumer> &dep);
+    inline void remove(int fragID);
     template <bool iconsumer> inline void findIntersections(const Dependency<iconsumer> &dep, std::vector<Dependency<consumer>> &out);
-    template <bool iconsumer> inline void findAndRemoveIntersections(const Dependency<iconsumer> &dep, std::vector<Dependency<consumer>> *out, HW hw);
-    template <bool iconsumer> inline void removeIntersections(const Dependency<iconsumer> &dep, HW hw);
-    inline void subtractAllRegions(DependencyRegion &region);
+    template <bool iconsumer> inline void findAndRemoveIntersections(const Dependency<iconsumer> &dep, std::vector<Dependency<consumer>> *out, bool doRemove = true);
+    template <bool iconsumer> inline void removeIntersections(const Dependency<iconsumer> &dep);
     inline uint32_t removeByTokenMask(uint32_t mask, bool dst);
     inline uint32_t removeOOOWritesByRegion(const DependencyRegion &region);
-    inline bool implies(const Dependency<consumer> &other);
 
-    template <typename Func> inline void forEach(Func f)                { for (auto &entry : deps) f(entry); }
-    template <typename Func> inline void forEach(Func f) const          { for (auto &entry : deps) f(entry); }
+    template <typename Func> inline void forEach(Func f)                { for (auto &entry : deps) if (entry.active) f(entry); }
+    template <typename Func> inline void forEach(Func f) const          { for (auto &entry : deps) if (entry.active) f(entry); }
 
 #ifdef NGEN_DEBUG
     inline void dump() const;
@@ -232,6 +273,7 @@ inline PipeMask allPipes(HW hw)
 {
     PipeMask mask = PipeMaskA | PipeMaskO;
     if (hw >= HW::XeHP) mask |= PipeMaskF | PipeMaskI | PipeMaskL;
+    if (hw >= HW::XeHPC) mask |= PipeMaskM;
 
     return mask;
 }
@@ -263,6 +305,8 @@ inline GeneralizedPipe getPipe(HW hw, const Instruction &insn, bool checkOOO = t
         }
     }
 
+    if (hw >= HW::XeHPC && (op == Opcode::math))
+        return PipeMaskM;
 
     PipeMask mask = PipeMaskNone;
 
@@ -271,7 +315,7 @@ inline GeneralizedPipe getPipe(HW hw, const Instruction &insn, bool checkOOO = t
     // Exception: if there are any long operands, it's a long pipe instruction.
     if (hw >= HW::XeHP) {
         auto dt = insn.dstTypecode();
-        unsigned lmask = 3;
+        unsigned lmask = (hw == HW::XeHPC) ? 0b1011 : 0b0011;   // Note: assumes PVC-XT
         if ((dt & lmask) == lmask)
             mask |= PipeMaskL;
         else if (dt & 8)
@@ -351,6 +395,18 @@ DependencyRegion::DependencyRegion(HW hw_, int esize, RegData rr)
     };
 
     auto compress = [&](uint64_t m) -> uint32_t {
+        if (hw_ >= HW::XeHPC) {
+            // Regions tracked at word granularity. OR and pack adjacent bits.
+            // If any sub-word writes, need to track WAW dependencies.
+            if ((m ^ (m >> 1)) & 0x5555555555555555)
+                checkWAW = true;
+            m = (m | (m >> 1)) & 0x5555555555555555;
+            m = (m | (m >> 1)) & 0x3333333333333333;
+            m = (m | (m >> 2)) & 0x0F0F0F0F0F0F0F0F;
+            m = (m | (m >> 4)) & 0x00FF00FF00FF00FF;
+            m = (m | (m >> 8)) & 0x0000FFFF0000FFFF;
+            m |= (m >> 16);
+        }
         return uint32_t(m);
     };
 
@@ -445,6 +501,7 @@ inline int timeout(GeneralizedPipe pipe)
         case PipeMaskI: return 11;
         case PipeMaskF: return 11;
         case PipeMaskL: return 15;
+        case PipeMaskM: return 19;
         default:        return std::numeric_limits<int>::max();
     }
 }
@@ -501,6 +558,7 @@ inline bool intersects(const Dependency<false> &dep1, const Dependency<true> &de
         //   * If producer is in-order, is it close enough to require tracking the dependency?
         //   * Do the producer+consumer regions overlap?
         if (dep1.read() && dep2.read())                                                             return false;
+        if (!(dep1.write() && dep2.write() && (dep1.region.checkWAW || dep2.region.checkWAW)))
         if (dep2.write() && (dep1.pipe == dep2.pipe) && (dep1.pipe != GeneralizedPipe::Math()))     return false;
         if (dep1.pipe.inOrder() && (distance(dep1, dep2, dep1.pipe) >= timeout(dep1.pipe)))         return false;
         return intersects(dep1.region, dep2.region);
@@ -511,8 +569,7 @@ inline bool intersects(const Dependency<false> &dep1, const Dependency<true> &de
         if (dep1.pipe.inOrder()) {
             auto commonPipe = (dep1.pipe.inOrderPipe() | PipeMaskA) & dep2.depPipe;
             if (commonPipe)
-                return (distance(dep1, dep2, dep1.pipe) >= dep2.dist);      // In theory should check timeout, but this
-                                                                            // path is only used for removing dependencies.
+                return (distance(dep1, dep2, dep1.pipe) >= dep2.dist);
         }
         return false;
     }
@@ -595,9 +652,75 @@ inline bool impliesWithoutRegion(const Dependency<true> &dep1, const Dependency<
 }
 
 template <bool consumer>
-inline bool implies(const Dependency<consumer> &dep1, const Dependency<consumer> &dep2)
+void DependencyTable<consumer>::clear()
 {
-    return impliesWithoutRegion(dep1, dep2) && contains(dep1.region, dep2.region);
+    deps.clear();
+    frags.clear();
+    for (int l = 0; l < NListTypes; l++)
+        std::fill(heads[l].begin(), heads[l].end(), none);
+}
+
+template <bool consumer>
+void DependencyTable<consumer>::reserve(int icount)
+{
+    if (consumer)
+        icount *= 4;
+    deps.reserve(icount);
+    frags.reserve(icount * 4);
+}
+
+template <bool consumer>
+bool DependencyTable<consumer>::insertPrepare(int listType, int listIdx, Dependency<consumer> &dep, bool checkWeaker, bool checkStronger)
+{
+    for (auto fragID = heads[listType][listIdx]; fragID != none;) {
+        auto &frag = frags[fragID];
+        auto &entry = deps[frag.depID];
+
+        bool noRegions = (dep.region.unspecified && entry.region.unspecified);
+
+        if (checkWeaker && impliesWithoutRegion(entry, dep)) {
+            if (noRegions)
+                return false;
+            dep.region.subtract(entry.region);
+            if (dep.region.empty())
+                return false;
+        }
+
+        if (checkStronger && impliesWithoutRegion(dep, entry)) {
+            entry.region.subtract(dep.region);
+            if (entry.region.empty() || noRegions)
+                remove(fragID);
+        }
+
+        fragID = frag.next[listType];
+    }
+
+    return true;
+}
+
+template <bool consumer>
+void DependencyTable<consumer>::insertLinkedList(int listType, int listIdx, int32_t fragID)
+{
+    auto &head = heads[listType][listIdx];
+    auto &frag = frags[fragID];
+
+    frag.next[listType] = head;
+    frag.prev[listType] = makeHeadLink(listIdx);
+    if (head != none)
+        frags[head].prev[listType] = fragID;
+    head = fragID;
+}
+
+template <bool consumer>
+template <bool iconsumer>
+int DependencyTable<consumer>::getPipeIndex(const Dependency<iconsumer> &dep)
+{
+    auto checkPipe = iconsumer ? dep.depPipe : dep.pipe.inOrderPipe();
+
+    if (!checkPipe)
+        return -1;
+
+    return utils::log2(checkPipe);
 }
 
 // Insert dependency into table.
@@ -609,44 +732,102 @@ inline bool implies(const Dependency<consumer> &dep1, const Dependency<consumer>
 template <bool consumer>
 bool DependencyTable<consumer>::insert(Dependency<consumer> &dep, bool checkWeaker, bool checkStronger)
 {
-    for (auto entry = deps.begin(); entry != deps.end();) {
-        bool noRegions = (dep.region.unspecified && entry->region.unspecified);
+    bool toAdd = true;
+    int pidx = getPipeIndex(dep);
 
-        if (checkWeaker && impliesWithoutRegion(*entry, dep)) {
-            if (noRegions)
-                return false;
-            dep.region.subtract(entry->region);
-            if (dep.region.empty())
-                return false;
-        }
-        if (checkStronger && impliesWithoutRegion(dep, *entry)) {
-            entry->region.subtract(dep.region);
-            if (entry->region.empty() || noRegions) {
-                entry = deps.erase(entry);
-                continue;
-            }
-        }
-        entry++;
+    if (dep.hasToken())
+        toAdd = toAdd && insertPrepare(ListTypeToken, dep.token, dep, checkWeaker, checkStronger);
+    else if (!dep.region.unspecified) {
+        for (int r = dep.region.base; r < dep.region.base + dep.region.size; r++)
+            toAdd = toAdd && insertPrepare(ListTypeGRF, r, dep, checkWeaker, checkStronger);
+    } else if (pidx >= 0)
+        toAdd = toAdd && insertPrepare(ListTypePipe, pidx, dep, checkWeaker, checkStronger);
+
+    if (!toAdd)
+        return false;
+
+    auto depID = int(deps.size());
+    deps.push_back(dep);
+
+    // Create fragments.
+    bool hasRegion = !dep.region.unspecified && (dep.region.size > 0);
+    int ridx = hasRegion ? dep.region.base : grfListIdxUnspecified;
+    int nfrags = hasRegion ? dep.region.size : 1;
+    auto fragID = int(frags.size());
+
+    DependencyFragment frag;
+    frag.before = 0;
+    frag.after = nfrags - 1;
+    frag.depID = depID;
+    for (int l = 0; l < NListTypes; l++)
+        frag.prev[l] = frag.next[l] = none;
+
+    for (int o = 0; o < nfrags; o++, fragID++, frag.before++, frag.after--) {
+        frags.push_back(frag);
+        if (hasRegion || dep.region.unspecified)
+            insertLinkedList(ListTypeGRF, ridx++, fragID);
+        if (o > 0)
+            continue;
+        if (dep.hasToken())
+            insertLinkedList(ListTypeToken, dep.token, fragID);
+        if (pidx >= 0)
+            insertLinkedList(ListTypePipe, pidx, fragID);
     }
 
-    deps.push_back(dep);
     return true;
 }
 
 template <bool consumer>
-void DependencyTable<consumer>::remove(const Dependency<consumer> &dep)
+void DependencyTable<consumer>::remove(int fragID)
 {
-    deps.remove(dep);
+    auto &frag0 = frags[fragID];
+    deps[frag0.depID].active = false;
+
+    fragID -= frag0.before;
+    int nfrag = frag0.before + frag0.after + 1;
+
+    for (int i = 0; i < nfrag; i++, fragID++) {
+        auto &frag = frags[fragID];
+
+        for (int l = 0; l < NListTypes; l++) {
+            if (isHeadLink(frag.prev[l]))
+                heads[l][readHeadLink(frag.prev[l])] = frag.next[l];
+            else if (frag.prev[l] != none)
+                frags[frag.prev[l]].next[l] = frag.next[l];
+            if (frag.next[l] != none)
+                frags[frag.next[l]].prev[l] = frag.prev[l];
+            if (i > 0)
+                break;  // Only GRF linked lists contain multiple fragments per dependency.
+        }
+    }
 }
 
 // Find dependencies in the table intersecting the given dependency, and append them to the given list.
+// NB: the resulting list may contain duplicate dependencies.
 template <bool consumer>
 template <bool iconsumer>
 void DependencyTable<consumer>::findIntersections(const Dependency<iconsumer> &dep, std::vector<Dependency<consumer>> &out)
 {
-    for (auto &entry : deps)
-        if (intersects(dep, entry))
-            out.push_back(entry);
+    findAndRemoveIntersections(dep, &out, false);
+}
+
+template <bool consumer>
+template <bool iconsumer>
+void DependencyTable<consumer>::findAndRemoveIntersections(int listType, int listIdx, const Dependency<iconsumer> &dep, std::vector<Dependency<consumer>> *out, bool doRemove)
+{
+    for (auto fragID = heads[listType][listIdx]; fragID != none;) {
+        auto &frag = frags[fragID];
+        auto &entry = deps[frag.depID];
+        if (doRemove && !consumer && (distance(entry, dep, entry.pipe) >= timeout(entry.pipe)))
+            remove(fragID);
+        else if (intersects(dep, entry)) {
+            if (out != nullptr)
+                out->push_back(entry);
+            if (doRemove)
+                remove(fragID);
+        }
+        fragID = frag.next[listType];
+    }
 }
 
 // Find dependencies in the table intersecting the given dependency.
@@ -654,38 +835,53 @@ void DependencyTable<consumer>::findIntersections(const Dependency<iconsumer> &d
 // Also checks for, and removes, timed-out producer dependencies.
 template <bool consumer>
 template <bool iconsumer>
-void DependencyTable<consumer>::findAndRemoveIntersections(const Dependency<iconsumer> &dep, std::vector<Dependency<consumer>> *out, HW hw)
+void DependencyTable<consumer>::findAndRemoveIntersections(const Dependency<iconsumer> &dep, std::vector<Dependency<consumer>> *out, bool doRemove)
 {
-    for (auto entry = deps.begin(); entry != deps.end();) {
-        if (!consumer && (distance(*entry, dep, entry->pipe) >= timeout(entry->pipe))) {
-            entry = deps.erase(entry);
-            continue;
+    PipeMask checkPipe = PipeMaskNone;
+    bool checkToken = false;
+    bool checkRegion = !dep.region.empty();
+
+    if (iconsumer) {
+        if (dep.swsb) {
+            checkToken = true;
+            checkPipe = dep.depPipe;
+            checkRegion = false;
         }
-        if (intersects(dep, *entry)) {
-            if (out != nullptr)
-                out->push_back(*entry);
-            entry = deps.erase(entry);
-            continue;
-        }
-        entry++;
+    } else {
+        checkToken = true;
+        checkPipe = dep.pipe.inOrderPipe();
+    }
+
+    // Handle token dependencies.
+    if (checkToken && dep.hasToken() && dep.token != dep.tokenTBD)
+        findAndRemoveIntersections(ListTypeToken, dep.token, dep, out, doRemove);
+
+    // Handle pipeline dependencies.
+    if (checkPipe & PipeMaskA) {
+        for (int pidx = 0; pidx < NPipes; pidx++)
+            findAndRemoveIntersections(ListTypePipe, pidx, dep, out, doRemove);
+    } else if (checkPipe != PipeMaskNone) {
+        int pidx = utils::log2(checkPipe);
+        findAndRemoveIntersections(ListTypePipe, pidx, dep, out, doRemove);
+        findAndRemoveIntersections(ListTypePipe, PipeBitA, dep, out, doRemove);
+    }
+
+    // Handle GRF dependencies.
+    if (checkRegion) {
+        int base = dep.region.unspecified ? 0 : dep.region.base;
+        int len = dep.region.unspecified ? 256 : dep.region.size;
+        for (int r = base; r < base + len; r++)
+            findAndRemoveIntersections(ListTypeGRF, r, dep, out, doRemove);
+        findAndRemoveIntersections(ListTypeGRF, grfListIdxUnspecified, dep, out, doRemove);
     }
 }
 
 // Find dependencies in the table intersecting the given dependency, and remove them.
 template <bool consumer>
 template <bool iconsumer>
-void DependencyTable<consumer>::removeIntersections(const Dependency<iconsumer> &dep, HW hw)
+void DependencyTable<consumer>::removeIntersections(const Dependency<iconsumer> &dep)
 {
-    findAndRemoveIntersections(dep, nullptr, hw);
-}
-
-// Subtract all regions from the table from the given region.
-template <bool consumer>
-void DependencyTable<consumer>::subtractAllRegions(DependencyRegion &region)
-{
-    for (auto &entry : deps)
-        if (!entry.region.unspecified)
-            region.subtract(entry.region);
+    findAndRemoveIntersections(dep, nullptr);
 }
 
 // Remove dependencies from the table matching a token mask.
@@ -693,18 +889,24 @@ void DependencyTable<consumer>::subtractAllRegions(DependencyRegion &region)
 template <bool consumer>
 uint32_t DependencyTable<consumer>::removeByTokenMask(uint32_t mask, bool dst)
 {
-    auto unmatched = mask;
+    uint32_t unmatched = mask;
 
-    for (auto entry = deps.begin(); entry != deps.end();) {
-        if (entry->token != entry->tokenTBD) {
-            auto entryMask = (1 << entry->token);
-            if ((entry->tokenSrc || (entry->tokenDst && dst)) && (mask & entryMask)) {
-                unmatched &= ~entryMask;
-                entry = deps.erase(entry);
-                continue;
+    while (mask) {
+        uint32_t mask1 = mask & ~(mask & (mask - 1));
+        mask &= ~mask1;
+        int token = utils::log2(mask1);
+
+        for (auto fragID = heads[ListTypeToken][token]; fragID != none;) {
+            auto &frag = frags[fragID];
+            auto &entry = deps[frag.depID];
+
+            if (entry.tokenSrc || (entry.tokenDst && dst)) {
+                unmatched &= ~mask1;
+                remove(fragID);
             }
+
+            fragID = frag.next[ListTypeToken];
         }
-        entry++;
     }
 
     return unmatched;
@@ -716,27 +918,24 @@ uint32_t DependencyTable<consumer>::removeOOOWritesByRegion(const DependencyRegi
 {
     uint32_t removed = 0;
 
-    for (auto entry = deps.begin(); entry != deps.end();) {
-        if (!entry->pipe.inOrder() && entry->write() && intersects(entry->region, region)) {
-            if (entry->token != entry->tokenTBD)
-                removed |= (1 << entry->token);
-            entry = deps.erase(entry);
-            continue;
+    if (!region.unspecified) {
+        for (int r = region.base; r < region.base + region.size; r++) {
+            for (auto fragID = heads[ListTypeGRF][r]; fragID != none;) {
+                auto &frag = frags[fragID];
+                auto &entry = deps[frag.depID];
+
+                if (!entry.pipe.inOrder() && entry.write() && intersects(entry.region, region)) {
+                    if (entry.token != entry.tokenTBD)
+                        removed |= (1 << entry.token);
+                    remove(fragID);
+                }
+
+                fragID = frag.next[ListTypeGRF];
+            }
         }
-        entry++;
     }
 
     return removed;
-}
-
-// Check if the given dependency is already implied by this table.
-template <>
-inline bool DependencyTable<false>::implies(const Dependency<false> &other)
-{
-    for (auto &entry : deps)
-        if (autoswsb::implies(entry, other))
-            return true;
-    return false;
 }
 
 #ifdef NGEN_DEBUG
@@ -747,12 +946,14 @@ inline void dumpPipeMask(PipeMask mask, bool spacers = true)
         std::cerr << char((mask & PipeMaskF) ? 'F' : ' ');
         std::cerr << char((mask & PipeMaskI) ? 'I' : ' ');
         std::cerr << char((mask & PipeMaskL) ? 'L' : ' ');
+        std::cerr << char((mask & PipeMaskM) ? 'M' : ' ');
         std::cerr << char((mask & PipeMaskO) ? 'O' : ' ');
     } else {
         if (mask & PipeMaskA) std::cerr << 'A';
         if (mask & PipeMaskF) std::cerr << 'F';
         if (mask & PipeMaskI) std::cerr << 'I';
         if (mask & PipeMaskL) std::cerr << 'L';
+        if (mask & PipeMaskM) std::cerr << 'M';
         if (mask & PipeMaskO) std::cerr << 'O';
         if (mask == PipeMaskNone) std::cerr << '-';
     }
@@ -780,7 +981,7 @@ void DependencyRegion::dump() const
         if (size > 1)
             std::cerr << "-r" << int(base + size - 1);
 
-    auto fullMask = ~uint32_t(0);
+    auto fullMask = (hw >= HW::XeHPC) ? ~uint64_t(0) : ~uint32_t(0);
         bool partial = false;
         for (int ii = 0; ii < size; ii++)
             partial |= (masks[ii] != fullMask);
@@ -841,10 +1042,51 @@ template <bool consumer>
 void DependencyTable<consumer>::dump() const
 {
     std::cerr << (consumer ? "Consumers:\n" : "Producers:\n");
-    for(const auto &dep : deps) {
-        std::cerr << '\t';
-        dep.dump();
+    for (size_t i = 0; i < deps.size(); i++) {
+        if (!deps[i].active)
+            continue;
+        std::cerr << i << ":\t";
+        deps[i].dump();
         std::cerr << std::endl;
+    }
+
+    for (int l = 0; l < NListTypes; l++) {
+        for (size_t i = 0; i < heads[l].size(); i++) {
+            auto fragID = heads[l][i], lastFragID = makeHeadLink(i);
+            if (fragID != none) {
+                switch (l) {
+                    case ListTypeGRF:
+                        std::cerr << 'r';
+                        if (i == grfListIdxUnspecified)
+                            std::cerr << '?';
+                        else
+                            std::cerr << i;
+                        break;
+                    case ListTypeToken:
+                        std::cerr << '$';
+                        if (i == Dependency<consumer>::tokenTBD)
+                            std::cerr << '?';
+                        else
+                            std::cerr << i;
+                        break;
+                    case ListTypePipe:
+                        if (i > NPipes)
+                            std::cerr << '?';
+                        else
+                            std::cerr << "AFILMO"[i % (NPipes + 1)];
+                        break;
+                }
+                std::cerr << ":\t";
+                while (fragID != none) {
+                    if (frags[fragID].prev[l] != lastFragID)
+                        std::cerr << "(bad last ptr) ";
+                    std::cerr << frags[fragID].depID << " -> ";
+                    lastFragID = fragID;
+                    fragID = frags[fragID].next[l];
+                }
+                std::cerr << std::endl;
+            }
+        }
     }
 }
 #endif
@@ -953,6 +1195,10 @@ inline BasicBlockList getBasicBlocks(HW hw, const Program &program)
         // Add predecessor links to every successor.
         for (auto succ : bb.succ)
             succ->pred.push_back(&bb);
+
+        // Preallocate dependency memory.
+        bb.producers.reserve(bb.iend - bb.istart);
+        bb.consumers.reserve(bb.iend - bb.istart);
     }
 
     return list;
@@ -962,6 +1208,8 @@ template <typename Instruction>
 inline bool canDefaultPipe(HW hw, const Instruction &insn)
 {
     if (hw >= HW::XeHP && insn.opcode() == Opcode::mov_gen12 && (insn.dstTypecode() ^ insn.src0Typecode()) & 0x8)
+        return false;
+    if (hw >= HW::XeHPC && insn.dstTypecode() == 0xB /* :df */)
         return false;
     return true;
 }
@@ -1048,6 +1296,8 @@ inline bool arfNeedsSync(ARFType type)
 // Get preferred SBID for a given GRF.
 inline uint8_t preferredSBID(HW hw, uint8_t base)
 {
+    if (hw >= HW::XeHPC)
+        return (base >> 2) & 0x1F;
     return (base >> 3) & 0xF;
 }
 
@@ -1056,7 +1306,7 @@ template <typename Program>
 inline uint8_t chooseSBID(HW hw, Program &program, int32_t inum, int32_t counterA, const DependencyTable<false> &incoming, const DependencyTable<false> &producers, uint32_t maskDst)
 {
     uint32_t unclaimed = (uint64_t(1) << tokenCount(hw)) - 1;
-    std::array<int32_t, 16> pastExpiration;
+    std::array<int32_t, 32> pastExpiration;
     constexpr int32_t infinite = std::numeric_limits<int32_t>::max();
 
     // Priority 1: choose SBID that is an explicit dst dependency for this instruction, if any.
@@ -1289,7 +1539,7 @@ inline void analyze(HW hw, Program &program, BasicBlock &bb, int phase)
 
                 // Remove all intersecting live producers from the table and save them.
                 auto dStart = depList.size();
-                bb.producers.findAndRemoveIntersections(consumeOp, &depList, hw);
+                bb.producers.findAndRemoveIntersections(consumeOp, &depList);
                 auto dEnd = depList.size();
 
                 // If not final, subtract each of them from original dependency region.
@@ -1358,7 +1608,7 @@ inline void analyze(HW hw, Program &program, BasicBlock &bb, int phase)
                     generated.depPipe = PipeMaskA;
                     generated.dist = 1;
                     if (tokenMaskSrc || tokenMaskDst) {
-                        bb.producers.removeIntersections(generated, hw);
+                        bb.producers.removeIntersections(generated);
                         generated.depPipe = PipeMaskNone;
                         generated.dist = 0;
                         auto swsb = (hw == HW::Gen12LP) ? SWSB(1) : SWSB<AllPipes>(1);
@@ -1370,6 +1620,7 @@ inline void analyze(HW hw, Program &program, BasicBlock &bb, int phase)
                 // If dual dependency (token + pipe) on OOO instruction, use A pipe for send, sync for others.
                 if ((generated.hasToken() || tokenAssigned) && generated.hasDist()) {
                     if (insn.opcode() == Opcode::send || insn.opcode() == Opcode::sendc) {
+                        if (!(hw >= HW::XeHPC && (generated.depPipe == PipeMaskI || generated.depPipe == PipeMaskF)))
                             generated.depPipe = PipeMaskA;
                     } else {
                         auto distGen = generated;
@@ -1394,8 +1645,16 @@ inline void analyze(HW hw, Program &program, BasicBlock &bb, int phase)
                 bool defaultPipe = generated.pipe.inOrder() && (generated.depPipe == generated.pipe.inOrderPipe())
                                                             && canDefaultPipe(hw, insn);
 
-                bool acceptsSrc = (!tokenAssigned || generated.pipe.inOrder()) && (generated.depPipe == PipeMaskNone);
-                bool acceptsDst = acceptsSrc || defaultPipe;
+                bool acceptsSrc = false, acceptsDst = false;
+                if (generated.pipe.inOrder() || !tokenAssigned) {
+                    if (hw >= HW::XeHPC) {
+                        acceptsSrc = (generated.depPipe == PipeMaskNone || defaultPipe);
+                        acceptsDst = acceptsSrc || (generated.depPipe == PipeMaskA);
+                    } else {
+                        acceptsSrc = (generated.depPipe == PipeMaskNone);
+                        acceptsDst = acceptsSrc || defaultPipe;
+                    }
+                }
 
                 if (tokenMaskDst && acceptsDst) {
                     generated.token = utils::bsr(tokenMaskDst);
@@ -1450,11 +1709,11 @@ inline void analyze(HW hw, Program &program, BasicBlock &bb, int phase)
                 // After assigning SWSB to in-order instructions, clean producer list of known SWSB and sync dependencies.
                 if (tokenMaskSrc) bb.producers.removeByTokenMask(tokenMaskSrc, false);
                 if (tokenMaskDst) bb.producers.removeByTokenMask(tokenMaskDst, true);
-                bb.producers.removeIntersections(generated, hw);
+                bb.producers.removeIntersections(generated);
             }
         } else {
             // SWSB specified. Consume any dependencies associated with this SWSB.
-            bb.producers.removeIntersections(generated, hw);
+            bb.producers.removeIntersections(generated);
 
             // Record token dependencies for populating the consumer table.
             if (!final) {
@@ -1466,7 +1725,7 @@ inline void analyze(HW hw, Program &program, BasicBlock &bb, int phase)
             consumeOp.region.hw = hw;
             if (insn.getOperandRegion(consumeOp.region, -1)) {
                 consumeOp.rw = true;
-                bb.producers.removeIntersections(consumeOp, hw);
+                bb.producers.removeIntersections(consumeOp);
             }
 
             // Clear auto-SWSB bit if it was set.

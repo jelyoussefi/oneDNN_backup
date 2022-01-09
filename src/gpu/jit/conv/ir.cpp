@@ -17,7 +17,9 @@
 #include <sstream>
 
 #include "common/math_utils.hpp"
+#include "common/optional.hpp"
 #include "gpu/jit/conv/ir.hpp"
+#include "gpu/jit/conv/ir_core.hpp"
 
 namespace dnnl {
 namespace impl {
@@ -27,6 +29,17 @@ namespace jit {
 using namespace ir_utils;
 
 namespace {
+
+struct mem_usage_guard_t {
+    mem_usage_guard_t(int *mem_usage, int size) : ptr(mem_usage), size(size) {
+        *ptr += size;
+    }
+
+    ~mem_usage_guard_t() { *ptr -= size; }
+
+    int *ptr;
+    int size;
+};
 
 // Helper class to print IR objects.
 class ir_printer_t : public ir_visitor_t {
@@ -43,9 +56,11 @@ public:
     }
 
     void _visit(const alloc_t &obj) override {
+        auto guard
+                = mem_usage_guard(obj.kind == alloc_kind_t::grf ? obj.size : 0);
         print_indent();
         out_ << "alloc " << obj.buf.as<var_t>().name << "[" << obj.size
-             << "]\n";
+             << "] (mem_usage: " << mem_usage_ << ")\n";
         visit(obj.body);
     }
 
@@ -125,6 +140,7 @@ public:
     }
 
     void _visit(const let_t &obj) override {
+        auto guard = mem_usage_guard(obj.var.type().size());
         print_indent();
         out_ << obj.var << "." << obj.var.type() << " = " << obj.value << "\n";
         visit(obj.body);
@@ -205,6 +221,10 @@ public:
     void _visit(const var_t &obj) override { out_ << obj.name; }
 
 private:
+    mem_usage_guard_t mem_usage_guard(int size) {
+        return mem_usage_guard_t(&mem_usage_, size);
+    }
+
     static std::string strip_parens(const std::string &s) {
         if (s.size() < 2 || s[0] != '(' || s[s.size() - 1] != ')') return s;
         auto ret = s;
@@ -224,6 +244,10 @@ private:
     int indent_ = 0;
 
     std::string prefix_ = "  ";
+
+    // Size required for all enclosed let/alloc statements. The value is
+    // updated during traversal.
+    int mem_usage_ = 0;
 };
 
 class substitute_mutator_t : public ir_mutator_t {
@@ -233,23 +257,19 @@ public:
 
     int substitutions() const { return substitutions_; }
 
-    dispatch_func_type find_dispatch_func(int64_t) const override {
-        return mutate_object;
-    }
+#define HANDLE_IR_OBJECT(type) \
+    object_t _mutate(const type &obj) override { \
+        auto *this_mutator = (substitute_mutator_t *)this; \
+        if (this_mutator->from_.impl() == (const object_impl_t *)&obj) { \
+            this_mutator->substitutions_++; \
+            return this_mutator->to_; \
+        } \
+        return ir_mutator_t::_mutate(obj); \
+    };
 
-    static object_t mutate_object(
-            ir_mutator_t *mutator, const object_impl_t &obj) {
-        auto *this_mutator = (substitute_mutator_t *)mutator;
+    HANDLE_MUTATE_TARGETS()
 
-        if (this_mutator->from_.is_same(obj)) {
-            this_mutator->substitutions_++;
-            return this_mutator->to_;
-        }
-
-        auto ti = obj.dispatch_type_id();
-        auto f = mutator->ir_mutator_t::find_dispatch_func(ti);
-        return f(mutator, obj);
-    }
+#undef HANDLE_IR_OBJECT
 
 private:
     object_t from_;
@@ -273,6 +293,77 @@ public:
 #undef HANDLE_IR_OBJECT
 
     std::vector<stmt_t> stmts;
+};
+
+class alloc_injector_t : public ir_mutator_t {
+public:
+    alloc_injector_t(const stmt_t &root, const std::vector<stmt_t> &allocs,
+            bool put_innermost)
+        : root_(root), put_innermost_(put_innermost), allocs_(allocs) {
+        for (auto &_a : allocs) {
+            auto &a = _a.as<alloc_t>();
+            if (a.kind != alloc_kind_t::global) ir_assert(a.size > 0) << _a;
+            alloc_map_.insert({a.buf, _a});
+        }
+        mutate(root_);
+        buf_total_refs_ = buf_cur_refs_;
+        for (auto &kv : buf_cur_refs_)
+            kv.second = 0;
+        in_ctor_ = false;
+    }
+
+#define HANDLE_IR_OBJECT(type) \
+    object_t _mutate(const type &obj) override { return mutate_stmt(obj); }
+
+    HANDLE_STMT_IR_OBJECTS()
+
+#undef HANDLE_IR_OBJECT
+    object_t _mutate(const var_t &obj) override {
+        if (alloc_map_.find(obj) != alloc_map_.end()) buf_cur_refs_[obj]++;
+        return obj;
+    }
+
+private:
+    template <typename T>
+    object_t mutate_stmt(const T &obj) {
+        if (in_ctor_) return ir_mutator_t::_mutate(obj);
+        object_t new_obj = obj;
+        object_set_t<expr_t> undef_bufs;
+        if (put_innermost_) {
+            for (auto &kv : buf_cur_refs_)
+                if (kv.second == 0) undef_bufs.insert(kv.first);
+            new_obj = ir_mutator_t::_mutate(obj);
+        }
+        for (auto &a : allocs_) {
+            auto it = alloc_map_.find(a.as<alloc_t>().buf);
+            auto &buf = it->first;
+            if (it->second.is_empty()) continue; // Already injected.
+            bool do_inject = false;
+            if (put_innermost_) {
+                int cur_refs = buf_cur_refs_[buf];
+                int total_refs = buf_total_refs_[buf];
+                bool was_undef = (undef_bufs.count(buf) != 0);
+                do_inject = was_undef && (cur_refs == total_refs);
+            } else {
+                do_inject = root_.is_same(obj);
+            }
+            if (do_inject) {
+                auto &a = it->second.as<alloc_t>();
+                new_obj = alloc_t::make(
+                        a.buf, a.size, a.kind, a.attrs, new_obj);
+                it->second = stmt_t();
+            }
+        }
+        return new_obj;
+    }
+
+    bool in_ctor_ = true;
+    const stmt_t &root_;
+    bool put_innermost_;
+    std::vector<stmt_t> allocs_;
+    object_map_t<expr_t, stmt_t> alloc_map_;
+    object_map_t<expr_t, int> buf_total_refs_;
+    object_map_t<expr_t, int> buf_cur_refs_;
 };
 
 } // namespace
@@ -303,6 +394,21 @@ std::vector<stmt_t> flatten_statements(const stmt_t &root) {
     return f.stmts;
 }
 
+stmt_t inject_alloc_stmts(const stmt_t &stmt, const std::vector<stmt_t> &allocs,
+        bool put_innermost) {
+    alloc_injector_t injector(stmt, allocs, put_innermost);
+    return injector.mutate(stmt);
+}
+
+stmt_t inject_let_stmts(const stmt_t &stmt, const std::vector<stmt_t> &lets) {
+    stmt_t ret = stmt;
+    for (auto it = lets.rbegin(); it != lets.rend(); ++it) {
+        auto &let = it->as<let_t>();
+        ret = let_t::make(let.var, let.value, ret);
+    }
+    return ret;
+}
+
 expr_t abs(const expr_t &e) {
     ir_assert(is_const(e)) << e;
     if (to_cpp<bool>(e >= 0)) return e;
@@ -310,22 +416,24 @@ expr_t abs(const expr_t &e) {
 }
 
 expr_t cast(const expr_t &e, const type_t &type, bool saturate) {
-    if (e.type() == type) return e;
     return const_fold(cast_t::make(type, e, saturate));
 }
 
 bool is_zero(const expr_t &e) {
-    if (!e.type().is_scalar()) return false;
+    if (e.is_empty()) return false;
+    if (!e.type().is_scalar() || e.type().is_ptr()) return false;
     return e.is_equal(to_expr(0, e.type()));
 }
 
 bool is_one(const expr_t &e) {
-    if (!e.type().is_scalar()) return false;
+    if (e.is_empty()) return false;
+    if (!e.type().is_scalar() || e.type().is_ptr()) return false;
     return e.is_equal(to_expr(1, e.type()));
 }
 
 bool is_minus_one(const expr_t &e) {
-    if (!e.type().is_scalar()) return false;
+    if (e.is_empty()) return false;
+    if (!e.type().is_scalar() || e.type().is_ptr()) return false;
     return e.is_equal(to_expr(-1, e.type()));
 }
 
@@ -339,15 +447,6 @@ bool is_const_broadcast(const expr_t &e) {
 bool is_const_broadcast(const expr_t &e, const expr_t &value) {
     if (!is_const_broadcast(e)) return false;
     return e.as<shuffle_t>().vec[0].is_equal(value);
-}
-
-bool all_of(const expr_t &e, const expr_t &value) {
-    auto *shuffle = e.as_ptr<shuffle_t>();
-    if (!shuffle) return e.is_equal(value);
-    for (auto &i : shuffle->idx) {
-        if (!shuffle->vec[i].is_equal(value)) return false;
-    }
-    return true;
 }
 
 expr_t make_buffer(const std::string &name) {
@@ -394,10 +493,28 @@ std::vector<stmt_t> find_stmt_groups(
     return ret;
 }
 
-stmt_t find_stmt_group(const object_t &root, const stmt_label_t &label) {
+utils::optional_t<stmt_t> find_stmt_group(
+        const object_t &root, const stmt_label_t &label) {
     auto groups = find_stmt_groups(root, label);
-    ir_assert(groups.size() == 1);
-    return groups[0];
+    if (groups.size() == 1)
+        return groups[0];
+    else
+        return utils::nullopt;
+}
+
+class stmt_group_remover_t : public ir_mutator_t {
+public:
+    stmt_group_remover_t(stmt_label_t label) : label_(label) {}
+    object_t _mutate(const stmt_group_t &obj) override {
+        if (obj.label == label_) return stmt_t();
+        return ir_mutator_t::_mutate(obj);
+    }
+    stmt_label_t label_;
+};
+
+object_t remove_stmt_group(const object_t &root, stmt_label_t label) {
+    stmt_group_remover_t remover(label);
+    return remover.mutate(root);
 }
 
 stmt_t get_stmt_body(const stmt_t &stmt) {
@@ -420,7 +537,7 @@ stmt_t replace_stmt_body(const stmt_t &stmt, const stmt_t &new_body) {
     auto *alloc = stmt.as_ptr<alloc_t>();
     if (alloc) {
         return alloc_t::make(
-                alloc->buf, alloc->size, alloc->kind, alloc->attr, new_body);
+                alloc->buf, alloc->size, alloc->kind, alloc->attrs, new_body);
     }
 
     auto *_for = stmt.as_ptr<for_t>();
@@ -501,6 +618,109 @@ bool modulus_info_t::is_modulus_constraint(const expr_t &e) {
     if (!is_const(mod_op->b)) return false;
 
     return true;
+}
+
+int64_t bound_finder_base_t::find_bound_impl(
+        const expr_t &e, bool is_low) const {
+    int64_t def_bound = unlimited_bound(is_low);
+    if (is_const(e)) return to_cpp<int64_t>(e);
+    if (is_var(e)) return get_var_bound(e, is_low);
+
+    auto *unary = e.as_ptr<unary_op_t>();
+    if (unary) {
+        ir_assert(unary->op_kind == op_kind_t::_minus) << e;
+        auto a = find_bound_impl(unary->a, !is_low);
+        if (!is_good_bound(a)) return def_bound;
+        return -a;
+    }
+
+    auto *binary = e.as_ptr<binary_op_t>();
+    if (binary) {
+        switch (binary->op_kind) {
+            case op_kind_t::_add: {
+                auto a = find_bound_impl(binary->a, is_low);
+                auto b = find_bound_impl(binary->b, is_low);
+                if (!is_good_bound(a) || !is_good_bound(b)) return def_bound;
+                return a + b;
+            }
+            case op_kind_t::_sub: {
+                auto a = find_bound_impl(binary->a, is_low);
+                auto b = find_bound_impl(binary->b, !is_low);
+                if (!is_good_bound(a) || !is_good_bound(b)) return def_bound;
+                return a - b;
+            }
+            case op_kind_t::_mul: {
+                auto a = binary->a;
+                auto b = binary->b;
+                if (!is_const(a) && is_const(b)) std::swap(a, b);
+                if (!is_const(a)) return def_bound;
+
+                auto a_const = to_cpp<int64_t>(a);
+                if (a_const == 0) return 0;
+
+                auto b_lo = find_low_bound(b);
+                auto b_hi = find_high_bound(b);
+                auto b_lo_ok = is_good_bound(b_lo);
+                auto b_hi_ok = is_good_bound(b_hi);
+
+                if ((a_const > 0) == is_low && b_lo_ok) return a_const * b_lo;
+                if ((a_const > 0) != is_low && b_hi_ok) return a_const * b_hi;
+
+                break;
+            }
+            case op_kind_t::_div: {
+                if (!is_const(binary->b)) return def_bound;
+
+                auto b = to_cpp<int64_t>(binary->b);
+                ir_assert(b != 0);
+
+                auto a = find_bound_impl(binary->a, b > 0 ? is_low : !is_low);
+                if (!is_good_bound(a)) return def_bound;
+
+                bool is_neg = ((a > 0) && (b < 0)) || ((a < 0) && (b > 0));
+
+                int64_t div_bound;
+                if (is_low != is_neg) {
+                    // Truncate away from zero.
+                    div_bound = utils::div_up(std::abs(a), std::abs(b));
+                } else {
+                    // Truncate towards zero.
+                    div_bound = std::abs(a) / std::abs(b);
+                }
+                if (is_neg) div_bound *= -1;
+                return div_bound;
+            }
+            case op_kind_t::_mod: {
+                if (is_low) return 0;
+                auto max_mod = find_bound_impl(binary->b, /*is_low=*/false);
+                if (!is_good_bound(max_mod)) return def_bound;
+                return max_mod - 1;
+            }
+            default: break;
+        }
+    }
+
+    auto *cast = e.as_ptr<cast_t>();
+    if (cast) {
+        // Saturate if needed, otherwise assume the same bounds.
+        if (!cast->is_bool_vec_u16() && !cast->saturate)
+            return find_bound_impl(cast->expr, is_low);
+
+        if (is_low) {
+            auto type_lo = cast->type.min<int64_t>();
+            auto lo = find_low_bound(cast->expr);
+            return std::max(type_lo, lo);
+        }
+        // Check u64 explicitly as its max doesn't fit into int64_t.
+        if (cast->type.is_u64()) return find_bound_impl(cast->expr, is_low);
+        auto type_hi = cast->type.max<int64_t>();
+        auto hi = find_high_bound(cast->expr);
+        return std::min(type_hi, hi);
+    }
+
+    if (e.type().is_bool()) return is_low ? 0 : 1;
+
+    return def_bound;
 }
 
 bool is_linear_var_transform(const expr_t &e, linear_transform_t &t) {
@@ -653,6 +873,9 @@ bool constraint_set_t::can_prove_impl(
 
     if (modulus_info_t::is_modulus_constraint(e)) return can_prove_modulus(e);
     if (relation_t::is_relation_constraint(e)) return can_prove_relation(e);
+
+    // Try to estimate bounds for compound relation.
+    if (try_prove_compound_relation(e)) return true;
 
     // Can't prove.
     return false;

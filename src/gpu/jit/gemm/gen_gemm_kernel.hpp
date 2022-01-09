@@ -67,6 +67,7 @@ protected:
             case compute::gpu_arch_t::xe_lp: return ngen::HW::XeLP;
             case compute::gpu_arch_t::xe_hp: return ngen::HW::XeHP;
             case compute::gpu_arch_t::xe_hpg: return ngen::HW::XeHPG;
+            case compute::gpu_arch_t::xe_hpc: return ngen::HW::XeHPC;
             default: return ngen::HW::Unknown;
         }
     }
@@ -119,7 +120,10 @@ struct gen_gemm_nocopy_kernel_t : public gen_gemm_kernel_t {
             problem_.batchDims = batch_dims;
         }
         if (ab_offset) problem_.abOffset = ABOffset::Calc;
-        if (c_type == data_type::s32) problem_.Ts = Type::f32;
+
+        bool dt_int_ok = (a_type == data_type::s8 || a_type == data_type::u8);
+        if (dt_int_ok) problem_.Ts = Type::f32;
+
         if (post_ops.len() > 0) {
             problem_.post_ops = post_ops;
             if (a_type == data_type::f16) problem_.Ts = Type::f32;
@@ -127,7 +131,9 @@ struct gen_gemm_nocopy_kernel_t : public gen_gemm_kernel_t {
         if (c_offset || bias) {
             assert(!(c_offset && bias));
             problem_.cOffset = bias ? COffset::Pre : COffset::Post;
-            problem_.CO.base = ngen::AddressBase::createBTS(0);
+            problem_.CO.base = (arch == compute::gpu_arch_t::xe_hpc)
+                    ? ngen::AddressBase::createA64(true)
+                    : ngen::AddressBase::createBTS(0);
             problem_.CO.crosspack = 1;
             problem_.CO.padded = false;
             problem_.CO.alignment = problem_.C.alignment;
@@ -143,21 +149,24 @@ struct gen_gemm_nocopy_kernel_t : public gen_gemm_kernel_t {
     static void choose_unrolls(compute::gpu_arch_t arch, int hw_threads,
             bool trans_a, bool trans_b, data_type_t a_type, data_type_t b_type,
             data_type_t c_type, int align_a, int align_b, int align_c, dim_t m,
-            dim_t n, dim_t k, dim_t batch, int batch_dims, int &unroll_m,
-            int &unroll_n, char &tag);
+            dim_t n, dim_t k, dim_t batch, int batch_dims, dim_t lda, dim_t ldb,
+            dim_t ldc, int &unroll_m, int &unroll_n, char &tag,
+            int &kernel_align_a, int &kernel_align_b, int &kernel_align_c);
 };
 
-struct gen_gemm_xehp_systolic_kernel_t : public gen_gemm_kernel_t {
+struct gen_gemm_xe_systolic_kernel_t : public gen_gemm_kernel_t {
     enum class offset_t { none, fixed, row, column, runtime };
 
     status_t init(compute::gpu_arch_t arch, int batch_dims, offset_t a_offset,
             offset_t b_offset, offset_t c_offset, offset_t bias, float alpha,
             float beta, const post_ops_t &post_ops, data_type_t a_type,
             data_type_t b_type, data_type_t c_type, data_type_t co_type,
-            data_type_t acc_type, int unroll_m, int unroll_n, char tag) {
+            data_type_t acc_type, bool packed_c, int unroll_m, int unroll_n,
+            char tag) {
 
-        bool arch_ok = (arch == compute::gpu_arch_t::xe_hp)
-                || (arch == compute::gpu_arch_t::xe_hpg);
+        bool arch_ok = (arch == compute::gpu_arch_t::xe_hp);
+        arch_ok |= (arch == compute::gpu_arch_t::xe_hpg);
+        arch_ok |= (arch == compute::gpu_arch_t::xe_hpc);
 
         if (!arch_ok) return status::unimplemented;
 
@@ -179,16 +188,17 @@ struct gen_gemm_xehp_systolic_kernel_t : public gen_gemm_kernel_t {
         problem_.A.packSize = unroll_m;
         problem_.B.packSize = unroll_n;
         problem_.C.packSize = 0;
-        problem_.A.tileR = 8;
+        problem_.A.tileR = (arch == compute::gpu_arch_t::xe_hpc) ? 16 : 8;
         problem_.A.tileC = ksys;
         problem_.A.padded = problem_.B.padded = true;
-        problem_.C.padded = false;
         problem_.A.setAlignment(32);
         problem_.B.setAlignment(32);
         problem_.C.setAlignment(int(types::data_type_size(c_type)));
         problem_.A.base = ngen::AddressBase::createA64(true);
         problem_.B.base = ngen::AddressBase::createA64(true);
         problem_.C.base = ngen::AddressBase::createA64(true);
+        if (packed_c) problem_.C = problem_.B;
+        problem_.C.padded = false;
         if (batch_dims > 0) {
             problem_.batch = BatchMode::Strided;
             problem_.batchDims = batch_dims;
@@ -215,7 +225,9 @@ struct gen_gemm_xehp_systolic_kernel_t : public gen_gemm_kernel_t {
             return status::unimplemented;
 
         if (problem_.cOffset != COffset::None) {
-            problem_.CO.base = ngen::AddressBase::createBTS(0);
+            problem_.CO.base = (arch == compute::gpu_arch_t::xe_hpc)
+                    ? ngen::AddressBase::createA64(true)
+                    : ngen::AddressBase::createBTS(0);
             problem_.CO.crosspack = 1;
             problem_.CO.padded = false;
             problem_.CO.alignment = problem_.C.alignment;

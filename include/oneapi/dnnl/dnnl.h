@@ -226,6 +226,18 @@ int DNNL_API dnnl_primitive_desc_query_s32(
 dnnl_status_t DNNL_API dnnl_primitive_create(dnnl_primitive_t *primitive,
         const_dnnl_primitive_desc_t primitive_desc);
 
+/// Creates a primitive from a cache blob.
+///
+/// @param primitive Output primitive.
+/// @param primitive_desc Primitive descriptor used to create the primitive.
+/// @param size Size of the cache blob in bytes.
+/// @param cache_blob Cache blob of size @p size.
+/// @returns #dnnl_success on success and a status describing the error
+///     otherwise.
+dnnl_status_t DNNL_API dnnl_primitive_create_from_cache_blob(
+        dnnl_primitive_t *primitive, const_dnnl_primitive_desc_t primitive_desc,
+        size_t size, const uint8_t *cache_blob);
+
 /// Executes a primitive.
 ///
 /// @param primitive Primitive to execute.
@@ -261,6 +273,21 @@ dnnl_status_t DNNL_API dnnl_primitive_execute(const_dnnl_primitive_t primitive,
 dnnl_status_t DNNL_API dnnl_primitive_get_primitive_desc(
         const_dnnl_primitive_t primitive,
         const_dnnl_primitive_desc_t *primitive_desc);
+
+/// Retrieves a cache blob associated with the given primitive.
+///
+/// @param primitive Primitive to query for the cache blob.
+/// @param size Size of the cache blob in bytes.
+/// @param cache_blob Cache blob of size @p size. If the @p cache_blob is
+///     nullptr then the size of the cache blob is returned in @p size.
+/// @returns #dnnl_success on success and a status describing the error
+///     otherwise.
+///
+/// @note The cache blob can be empty. It's the user's responsibility to check
+///     whether it's empty prior to passing it to
+///     #dnnl_primitive_create_from_cache_blob().
+dnnl_status_t DNNL_API dnnl_primitive_get_cache_blob(
+        const_dnnl_primitive_t primitive, size_t *size, uint8_t *cache_blob);
 
 /// Destroys a primitive.
 ///
@@ -939,20 +966,25 @@ dnnl_status_t DNNL_API dnnl_post_ops_get_params_binary(
 ///    Prelu weights tensor is passed in runtime execution phase. Prelu
 ///    weights tensor data type is implicitly assumed as f32 using plain
 ///    layout (a, ab, acb, acdb, acdeb)
-
+///
+/// @param post_ops Post-ops.
 /// @param mask Defines the correspondence between the output tensor
 ///     dimensions and the prelu weights tensor. The set i-th bit indicates
 ///     that a dedicated weights value is used for each index along that
 ///     dimension. Set the mask to 0 to use a common weights value
 ///     for the whole output tensor.
+/// @returns #dnnl_success on success and a status describing the error
+///     otherwise.
 dnnl_status_t DNNL_API dnnl_post_ops_append_prelu(
         dnnl_post_ops_t post_ops, int mask);
 
 /// Returns the parameters of a prelu post-op.
 ///
 /// @param post_ops Post-ops.
-/// @param index Index of the preu post-op.
+/// @param index Index of the prelu post-op.
 /// @param mask Mask of the prelu post-op.
+/// @returns #dnnl_success on success and a status describing the error
+///     otherwise.
 dnnl_status_t DNNL_API dnnl_post_ops_get_params_prelu(
         const_dnnl_post_ops_t post_ops, int index, int *mask);
 
@@ -3505,7 +3537,7 @@ dnnl_status_t DNNL_API dnnl_set_primitive_cache_capacity(int capacity);
 
 /// @} dnnl_api_primitive_cache
 
-/// @addtogroup dnnl_api_mathmode
+/// @addtogroup dnnl_api_mathmode Floating-point Math Mode
 /// @{
 
 /// Returns the floating-point math mode that will be used by default

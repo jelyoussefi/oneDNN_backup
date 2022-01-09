@@ -406,7 +406,7 @@ struct brg_blocking_t : public jit_brgemm_conv_conf_t {
     void get_from_jcp(const jit_brgemm_conv_conf_t &jcp) { *this = jcp; }
     void save_to_jcp(jit_brgemm_conv_conf_t &jcp) const { jcp = *this; }
 
-    status_t estimate_brgemm_ur(int spb);
+    status_t estimate_brgemm_ur();
     status_t get_brgemm_ur(
             const primitive_attr_t *attr, const memory_desc_t &dst_md);
 
@@ -423,7 +423,7 @@ struct brg_blocking_t : public jit_brgemm_conv_conf_t {
     float est_eff();
     void iterate_ker_block(brg_blocking_t &best_brgb, int kd_block,
             int kh_block, bool maybe_use_buffer, int max_ow_block_thr);
-    void calc_blocks();
+    status_t calc_blocks();
 
     bool fast_check_oc_block_1x1() const;
     float est_eff_1x1();
@@ -569,7 +569,7 @@ void brg_blocking_t::select_ic_block() {
     nb_ic = utils::div_up(ic, ic_block);
 }
 
-status_t brg_blocking_t::estimate_brgemm_ur(int spb) {
+status_t brg_blocking_t::estimate_brgemm_ur() {
     // Simple simulation of brgemm_desc init
     if (sp_block <= 0) return status::invalid_arguments;
     LDA = is_rtus
@@ -644,9 +644,9 @@ status_t brg_blocking_t::estimate_brgemm_ur(int spb) {
 status_t brg_blocking_t::get_brgemm_ur(
         const primitive_attr_t *attr, const memory_desc_t &dst_md) {
     // Detailed simulation of brgemm convolution init
-    if (sp_block <= 0 || ic_block <= 0 || sp_block <= 0 || oc_block <= 0)
+    if (sp_block <= 0 || ic_block <= 0 || oc_block <= 0)
         return status::invalid_arguments;
-    CHECK(estimate_brgemm_ur(is_os_blocking ? os_block : ow_block));
+    CHECK(estimate_brgemm_ur());
 
     LDD = oc_without_padding;
 
@@ -1099,7 +1099,7 @@ void brg_blocking_t::iterate_ker_block(brg_blocking_t &best_brgb, int kd_block_,
             use_buffer = use_buffer || (maybe_use_buffer && iwp != iw);
         if (is_amx(isa)) use_buffer = use_buffer || (use_M_mask > 0);
 
-        const status_t st = estimate_brgemm_ur(ow_block);
+        const status_t st = estimate_brgemm_ur();
         if (st != status::success) continue;
         os_block = sp_block = ow_block;
         update_blocks();
@@ -1110,7 +1110,7 @@ void brg_blocking_t::iterate_ker_block(brg_blocking_t &best_brgb, int kd_block_,
     }
 }
 
-void brg_blocking_t::calc_blocks() {
+status_t brg_blocking_t::calc_blocks() {
     sp = ow;
 
     nb_ic_blocking = 1;
@@ -1145,6 +1145,9 @@ void brg_blocking_t::calc_blocks() {
         }
     }
     *this = best_brgb;
+    if (!IMPLICATION(!is_os_blocking, sp_block > 0))
+        return status::unimplemented;
+
     if (is_os_blocking) {
         ow_block = ow;
         os_block = ow * oh_block;
@@ -1155,6 +1158,7 @@ void brg_blocking_t::calc_blocks() {
         ow_tail = ow % ow_block;
     }
     update_blocks();
+    return status::success;
 }
 
 bool brg_blocking_t::fast_check_oc_block_1x1() const {
@@ -1477,11 +1481,11 @@ void brg_blocking_t::calc_blocks_1x1() {
         const auto max_os_block_L2 = max_sp_block_L2;
 
         auto max_os_block_aliasing = 1000000 / nthr;
-        if ((oc_without_padding * os * dst_dsz) % 4096 == 0) {
+        if ((oc_without_padding * os * dst_dsz) % P4K == 0) {
             max_os_block_aliasing /= 1;
             for (auto cur_oc = oc_without_padding;
                     max_os_block_aliasing * dst_dsz > 400 && cur_oc % 2 == 0
-                    && cur_oc * os * dst_dsz >= 4096;
+                    && cur_oc * os * dst_dsz >= P4K;
                     cur_oc /= 2) {
                 max_os_block_aliasing /= 2;
             }
@@ -1531,7 +1535,7 @@ void brg_blocking_t::calc_blocks_1x1() {
         prev_spb = spb;
         os_block = ow_block = sp_block = spb;
         select_ic_block();
-        const status_t st = estimate_brgemm_ur(spb);
+        const status_t st = estimate_brgemm_ur();
         if (st != status::success) continue;
         update_blocks();
 
@@ -1715,8 +1719,14 @@ status_t init_conf(jit_brgemm_conv_conf_t &jcp, cpu_isa_t isa,
     if (jcp.is_1x1) return status::unimplemented;
     // TODO: check these restrictions
     if (is_amx(isa)) {
-        // disabled for first convolutions
-        if (jcp.ic <= 4) return status::unimplemented;
+        // disabled for two convolutions from ssd_resnet34
+        if ((jcp.ic == jcp.oc) && (jcp.ic == 128 || jcp.ic == 256)
+                && (jcp.oh == jcp.ow) && (jcp.oh == 150))
+            return status::unimplemented;
+        // disabled for first convolutions excepting 3d
+        const bool is_3d = jcp.ndims == 5;
+        if (jcp.ic <= 4 && !is_3d) return status::unimplemented;
+
         if (jcp.f_pad >= jcp.kd || jcp.t_pad >= jcp.kh || jcp.r_pad >= jcp.kw)
             return status::unimplemented;
         if (jcp.dilate_d > 0 || jcp.dilate_h > 0 || jcp.dilate_w > 0)
@@ -1764,7 +1774,9 @@ status_t init_conf(jit_brgemm_conv_conf_t &jcp, cpu_isa_t isa,
             cur_brgb.nb_oc = utils::div_up(jcp.oc, cur_brgb.oc_block);
             if (!cur_brgb.fast_check_oc_block()) continue;
 
-            cur_brgb.calc_blocks();
+            const status_t blocking_ok = cur_brgb.calc_blocks();
+            if (blocking_ok != status::success) continue;
+
             const status_t st = cur_brgb.get_brgemm_ur(&attr, dst_md);
             if (st != status::success) continue;
             cur_brgb.eff = cur_brgb.est_eff();
@@ -1849,10 +1861,10 @@ status_t init_conf(jit_brgemm_conv_conf_t &jcp, cpu_isa_t isa,
             // and overlap of input by kw
             const auto bd_blocking = 2 * jcp.amx_h;
             const auto ld_blocking = 2 * 16;
-            const auto A_ds = jcp.src_dsz * bd_blocking * jcp.K * jcp.kd_block
-                    * jcp.kh_block;
-            const auto B_ds = jcp.wei_dsz * ld_blocking * jcp.K * jcp.kd_block
-                    * jcp.kh_block * jcp.kw_block;
+            const auto A_ds
+                    = jcp.src_dsz * bd_blocking * jcp.ic * jcp.kd * jcp.kh;
+            const auto B_ds = jcp.wei_dsz * ld_blocking * jcp.ic * jcp.kd
+                    * jcp.kh * jcp.kw;
             const auto C_ds = jcp.acc_dsz * bd_blocking * ld_blocking;
             if (A_ds + B_ds + C_ds > brg_blocking_t::L1)
                 jcp.amx_tile_load_xx = true;
@@ -1882,7 +1894,7 @@ status_t init_conf(jit_brgemm_conv_conf_t &jcp, cpu_isa_t isa,
     // to avoid cache concurrent write access from different threads
     size_t sc_size = sizeof(brgemm_batch_element_t);
     jcp.adjusted_batch_size
-            = div_up(rnd_up(jcp.gemm_batch_size * sc_size, 4096), sc_size);
+            = div_up(rnd_up(jcp.gemm_batch_size * sc_size, P4K), sc_size);
 
     CHECK(pick_tags(jcp, src_md, weights_md, dst_md, bias_md));
     CHECK(attr.set_default_formats(&dst_md));
@@ -1901,15 +1913,25 @@ status_t init_conf(jit_brgemm_conv_conf_t &jcp, cpu_isa_t isa,
 
     if (jcp.exec_type == exec_trans) {
         // TODO: this is rough estimation of buffer for transpose input
-        jcp.inp_buffer_size = rnd_up(static_cast<dim_t>(jcp.idp)
-                        * (jcp.is_os_blocking ? rnd_up(jcp.ihp, jcp.brgM)
-                                              : jcp.ihp)
-                        * jcp.iwp * jcp.ngroups * jcp.nb_ic * jcp.ic_block
-                        * jcp.kh_sets * jcp.kw_sets,
-                4096);
+        dim_t ds = jcp.copy_block_only
+                ? (brg_blocking_t::get_inp_size(jcp.idp, jcp.od_block, jcp.kd,
+                           jcp.stride_d, jcp.dilate_d)
+                        + nstl::max(0, jcp.f_pad) + nstl::max(0, jcp.back_pad))
+                : jcp.idp;
+        dim_t hs = jcp.copy_block_only
+                ? (brg_blocking_t::get_inp_size(jcp.ihp, jcp.oh_block, jcp.kh,
+                           jcp.stride_h, jcp.dilate_h)
+                        + nstl::max(0, jcp.t_pad) + nstl::max(0, jcp.b_pad))
+                : jcp.ihp;
+        if (jcp.is_os_blocking)
+            hs = div_up(rnd_up(hs * jcp.iwp, jcp.brgM), jcp.iwp);
+
+        jcp.inp_buffer_size = rnd_up(ds * hs * jcp.iwp * jcp.ngroups * jcp.nb_ic
+                        * jcp.ic_block * jcp.kh_sets * jcp.kw_sets,
+                P4K);
         jcp.inp_buffer_mask_size = rnd_up(static_cast<dim_t>(jcp.nb_od)
                         * jcp.nb_oh * jcp.nb_ow * jcp.ngroups * jcp.nb_ic,
-                4096);
+                P4K);
     }
 
     return status::success;
@@ -1953,9 +1975,14 @@ status_t init_1x1_conf(jit_brgemm_conv_conf_t &jcp, cpu_isa_t isa,
         jcp.is_ic_padded = jcp.ic > ic_padded_block;
 
         // try to choose optimal loop order
+        // TODO: incorporate loop order into smart blocking selection
         auto wei_size = (size_t)jcp.oc * jcp.ic * jcp.wei_dsz;
         auto max_size = 0.75f * brg_blocking_t::L2;
-        jcp.loop_order = max_size < wei_size ? loop_ngcdhw : loop_ndhwgc;
+        const dim_t os = jcp.od * jcp.oh * jcp.ow;
+        const dim_t os_cutoff = 400; // approximate and empiric
+        const bool use_loop_ngcdhw
+                = max_size < wei_size || (jcp.mb == 1 && os < os_cutoff);
+        jcp.loop_order = use_loop_ngcdhw ? loop_ngcdhw : loop_ndhwgc;
     }
 
     const auto min_oc_block = 16;
@@ -2020,7 +2047,7 @@ status_t init_1x1_conf(jit_brgemm_conv_conf_t &jcp, cpu_isa_t isa,
     // to avoid cache concurrent access from different threads
     size_t sc_size = sizeof(brgemm_batch_element_t);
     jcp.adjusted_batch_size
-            = div_up(rnd_up(jcp.gemm_batch_size * sc_size, 4096), sc_size);
+            = div_up(rnd_up(jcp.gemm_batch_size * sc_size, P4K), sc_size);
 
     CHECK(pick_tags(jcp, src_md, weights_md, dst_md, bias_md));
     CHECK(attr.set_default_formats(&dst_md));
@@ -2076,24 +2103,24 @@ void init_scratchpad(memory_tracking::registrar_t &scratchpad,
             || (jcp.brg_type == brgemm_strd && jcp.exec_type == exec_vpad))
         scratchpad.book(key_brgemm_primitive_batch,
                 static_cast<size_t>(jcp.nthr) * jcp.adjusted_batch_size,
-                sizeof(brgemm_batch_element_t), 64);
+                sizeof(brgemm_batch_element_t), 64, P4K);
     if (jcp.exec_type == exec_trans) {
         size_t inp_buffer_size
                 = static_cast<size_t>(jcp.nthr) * jcp.inp_buffer_size;
-        scratchpad.book(
-                key_conv_brgemm_inp_buffer, inp_buffer_size, jcp.src_dsz);
+        scratchpad.book(key_conv_brgemm_inp_buffer, inp_buffer_size,
+                jcp.src_dsz, 0, P4K);
         size_t inp_buffer_mask_size
                 = static_cast<size_t>(jcp.nthr) * jcp.inp_buffer_mask_size;
         scratchpad.book(key_conv_brgemm_inp_buffer_mask, inp_buffer_mask_size,
-                sizeof(uint8_t));
+                sizeof(uint8_t), 0, P4K);
     }
     if (jcp.use_buffer) {
         scratchpad.book(key_brgemm_primitive_buffer, jcp.nthr * jcp.buffer_size,
-                jcp.acc_dsz);
+                jcp.acc_dsz, 0, P4K);
     }
     if (is_amx(jcp.isa)) {
-        scratchpad.book(
-                key_conv_amx_tile_buffer, jcp.nthr * 4 * 1024, sizeof(char));
+        scratchpad.book(key_conv_amx_tile_buffer, jcp.nthr * 2 * P4K,
+                sizeof(char), 0, P4K);
     }
 }
 

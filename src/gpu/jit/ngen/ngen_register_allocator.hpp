@@ -112,7 +112,7 @@ public:
     // Attempted allocation. Return value is invalid if allocation failed.
     GRFRange try_alloc_range(int nregs, Bundle base_bundle = Bundle(),
                              BundleGroup bundle_mask = BundleGroup::AllBundles());
-    GRF try_alloc(Bundle bundle = Bundle()) { return alloc_range(1, bundle)[0]; }
+    GRF try_alloc(Bundle bundle = Bundle());
 
     Subregister try_alloc_sub(DataType type, Bundle bundle = Bundle());
     template <typename T>
@@ -137,12 +137,15 @@ public:
 
     // Set register count.
     void setRegisterCount(int rcount);
+    int getRegisterCount() const { return reg_count;}
+
+    int countAllocedRegisters() const;
 
     void dump(std::ostream &str);
 
 protected:
     static constexpr int max_regs = 256;
-    using mtype = uint8_t;
+    using mtype = uint16_t;
 
     HW hw;                              // HW generation.
     uint8_t free_whole[max_regs / 8];   // Bitmap of free whole GRFs.

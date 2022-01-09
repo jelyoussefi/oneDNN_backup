@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -89,6 +89,7 @@ protected:
         test_fwd_pd_constructors<op_desc_t, pd_t>(op_desc, pd, aa);
         pd_fwd_hint = std::make_shared<pd_t>(pd);
 
+        EXPECT_ANY_THROW(logsoftmax_forward(pd, {}));
         // default primitive ctor
         auto logsoftmax = logsoftmax_forward();
         // regular primitive ctor
@@ -169,6 +170,7 @@ protected:
         test_bwd_pd_constructors<op_desc_t, pd_t, hint_pd_t>(
                 op_desc, pd, *pd_fwd_hint, aa);
 
+        EXPECT_ANY_THROW(logsoftmax_backward(pd, {}));
         // default primitive ctor
         auto logsoftmax = logsoftmax_backward();
         // regular primitive ctor
@@ -235,6 +237,9 @@ INSTANTIATE_TEST_SUITE_P(TestLogSoftmaxForwardFloat,
                 test_params<float> {prop_kind::forward_training, tag::nchw,
                         tag::undef, {2, 2, 128, 256}, 5, true,
                         dnnl_invalid_arguments},
+                test_params<float> {prop_kind::forward_training, tag::any,
+                        tag::undef, {2, 0, 5, 5}, 0, true,
+                        dnnl_invalid_arguments},
                 test_params<float> {prop_kind::forward_training, tag::nchw,
                         tag::undef, {2, 0, 5, 5}, 0},
                 test_params<float> {prop_kind::forward_training, tag::nchw,
@@ -267,6 +272,9 @@ GPU_INSTANTIATE_TEST_SUITE_P(TestLogSoftmaxForwardBfloat16,
                 test_params<bfloat16_t> {prop_kind::forward_training, tag::nchw,
                         tag::undef, {2, 2, 128, 256}, 5, true,
                         dnnl_invalid_arguments},
+                test_params<bfloat16_t> {prop_kind::forward_training, tag::any,
+                        tag::undef, {2, 0, 5, 5}, 0, true,
+                        dnnl_invalid_arguments},
                 test_params<bfloat16_t> {prop_kind::forward_training, tag::nchw,
                         tag::undef, {2, 0, 5, 5}, 0},
                 test_params<bfloat16_t> {prop_kind::forward_training, tag::nchw,
@@ -298,6 +306,9 @@ GPU_INSTANTIATE_TEST_SUITE_P(TestLogSoftmaxForwardHalf,
                                   true, dnnl_invalid_arguments},
                 test_params<float16_t> {prop_kind::forward_training, tag::nchw,
                         tag::undef, {2, 2, 128, 256}, 5, true,
+                        dnnl_invalid_arguments},
+                test_params<float16_t> {prop_kind::forward_training, tag::any,
+                        tag::undef, {2, 0, 5, 5}, 0, true,
                         dnnl_invalid_arguments},
                 test_params<float16_t> {prop_kind::forward_training, tag::nchw,
                         tag::undef, {2, 0, 5, 5}, 0},

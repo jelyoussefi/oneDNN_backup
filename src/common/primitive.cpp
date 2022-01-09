@@ -20,7 +20,11 @@
 
 #include "c_types_map.hpp"
 #include "engine.hpp"
+
+#if defined(DNNL_ENABLE_ITT_TASKS)
 #include "ittnotify.hpp"
+#endif
+
 #include "primitive.hpp"
 #include "primitive_desc.hpp"
 #include "primitive_exec_types.hpp"
@@ -81,23 +85,28 @@ nested_scratchpad_t::~nested_scratchpad_t() = default;
 #endif
 
 status_t primitive_create(primitive_iface_t **primitive_iface,
-        const primitive_desc_iface_t *primitive_desc_iface) {
+        const primitive_desc_iface_t *primitive_desc_iface,
+        const cache_blob_t &cache_blob = cache_blob_t()) {
 
     std::pair<primitive_iface_t *, bool> p_iface;
 
     if (get_verbose() >= 2) {
         double start_ms = get_msec();
-        CHECK(primitive_desc_iface->create_primitive_iface(p_iface));
+        CHECK(primitive_desc_iface->create_primitive_iface(
+                p_iface, cache_blob));
         double duration_ms = get_msec() - start_ms;
 
         const char *str = p_iface.second ? "cache_hit" : "cache_miss";
+        if (cache_blob) str = "from_cache_blob";
+
         std::string stamp;
         if (get_verbose_timestamp()) stamp = "," + std::to_string(start_ms);
-        printf("dnnl_verbose%s,create:%s,%s,%g\n", stamp.c_str(), str,
+        printf("onednn_verbose%s,create:%s,%s,%g\n", stamp.c_str(), str,
                 p_iface.first->pd()->info(), duration_ms);
         fflush(stdout);
     } else {
-        CHECK(primitive_desc_iface->create_primitive_iface(p_iface));
+        CHECK(primitive_desc_iface->create_primitive_iface(
+                p_iface, cache_blob));
     }
     return safe_ptr_assign((*primitive_iface), p_iface.first);
 }
@@ -109,9 +118,11 @@ status_t primitive_execute(
 
     stream->before_exec_hook();
 
+#if defined(DNNL_ENABLE_ITT_TASKS)
     const bool enable_itt = itt::get_itt(itt::__itt_task_level_low);
     if (enable_itt)
         itt::primitive_task_start(primitive_iface->pd()->impl()->kind());
+#endif
 
     if (get_verbose()) {
         stream->wait();
@@ -122,14 +133,16 @@ status_t primitive_execute(
         std::string stamp;
         if (get_verbose_timestamp()) stamp = "," + std::to_string(start_ms);
 
-        printf("dnnl_verbose%s,exec,%s,%g\n", stamp.c_str(),
+        printf("onednn_verbose%s,exec,%s,%g\n", stamp.c_str(),
                 primitive_iface->pd()->info(), duration_ms);
         fflush(stdout);
     } else {
         status = stream->enqueue_primitive(primitive_iface, ctx);
     }
 
+#if defined(DNNL_ENABLE_ITT_TASKS)
     if (enable_itt) itt::primitive_task_end();
+#endif
 
     stream->after_exec_hook();
 
@@ -159,11 +172,33 @@ status_t dnnl_primitive_create(primitive_iface_t **primitive_iface,
             != std::string::npos;
 
     if (!is_wino) {
+        const cache_blob_t dummy;
         return sc.check(dnnl::impl::primitive_create, primitive_iface,
-                primitive_desc_iface);
+                primitive_desc_iface, std::ref(dummy));
     }
 #endif
     return dnnl::impl::primitive_create(primitive_iface, primitive_desc_iface);
+}
+
+status_t dnnl_primitive_create_from_cache_blob(
+        primitive_iface_t **primitive_iface,
+        const primitive_desc_iface_t *primitive_desc_iface, size_t size,
+        const uint8_t *cache_blob) {
+    if (utils::any_null(primitive_iface, primitive_desc_iface, cache_blob)
+            || size == 0) {
+        return invalid_arguments;
+    }
+    const auto ekind = primitive_desc_iface->engine()->kind();
+    const auto runtime_kind = primitive_desc_iface->engine()->runtime_kind();
+    if (ekind != engine_kind::gpu
+            || (ekind == engine_kind::gpu
+                    && runtime_kind != runtime_kind::ocl)) {
+        return status::unimplemented;
+    }
+
+    cache_blob_t cb(const_cast<uint8_t *>(cache_blob), size);
+    return dnnl::impl::primitive_create(
+            primitive_iface, primitive_desc_iface, cb);
 }
 
 status_t dnnl_primitive_execute(const primitive_iface_t *primitive_iface,
@@ -198,6 +233,31 @@ status_t dnnl_primitive_get_primitive_desc(
     if (utils::any_null(primitive_iface, primitive_desc_iface))
         return invalid_arguments;
     return safe_ptr_assign(*primitive_desc_iface, primitive_iface->pd());
+}
+
+status_t dnnl_primitive_get_cache_blob(const primitive_iface_t *primitive_iface,
+        size_t *size, uint8_t *cache_blob) {
+    if (utils::any_null(primitive_iface, size)) {
+        return status::invalid_arguments;
+    }
+
+    const auto ekind = primitive_iface->engine()->kind();
+    const auto runtime_kind = primitive_iface->engine()->runtime_kind();
+    if (ekind != engine_kind::gpu
+            || (ekind == engine_kind::gpu
+                    && runtime_kind != runtime_kind::ocl)) {
+        return status::unimplemented;
+    }
+
+    if (!cache_blob) {
+        size_t sz = 0;
+        CHECK(primitive_iface->get_cache_blob_size(&sz));
+        (*size) = sz;
+        return status::success;
+    }
+
+    cache_blob_t cb(cache_blob, *size);
+    return primitive_iface->get_cache_blob(cb);
 }
 
 status_t dnnl_primitive_destroy(primitive_iface_t *primitive_iface) {
@@ -285,6 +345,15 @@ status_t dnnl_primitive::execute(exec_ctx_t &ctx) const {
     auto status = primitive_->execute(ctx);
     ctx.set_scratchpad_grantor(nullptr);
     return status;
+}
+
+status_t dnnl_primitive::get_cache_blob_size(size_t *size) const {
+    (*size) = 0;
+    return primitive_->get_cache_blob_size(size);
+}
+
+status_t dnnl_primitive::get_cache_blob(cache_blob_t cache_blob) const {
+    return primitive_->get_cache_blob(engine(), cache_blob);
 }
 
 // vim: et ts=4 sw=4 cindent cino^=l0,\:0,N-s

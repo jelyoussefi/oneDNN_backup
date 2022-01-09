@@ -97,7 +97,7 @@ status_t jit_uni_x8s8s32x_1x1_convolution_fwd_t<isa>::execute_forward(
             }
         }
     }
-    parallel(0, [&](const int ithr, const int nthr) {
+    parallel(pd()->jcp_.nthr, [&](const int ithr, const int nthr) {
         execute_forward_thr(ithr, nthr, src, weights, bias, weights_dw, bias_dw,
                 dst, src_zero_point, dst_zero_point, scratchpad,
                 post_ops_binary_rhs_arg_vec.data(),
@@ -154,8 +154,7 @@ void jit_uni_x8s8s32x_1x1_convolution_fwd_t<isa>::execute_forward_thr(
             : nullptr;
     const int32_t *zp_compensation = jcp.src_zero_point
             ? reinterpret_cast<int32_t *>(&w[offset])
-                    + (jcp.signed_input ? jcp.ngroups * jcp.oc_without_padding
-                                        : 0)
+                    + (jcp.signed_input ? jcp.ngroups * jcp.oc : 0)
             : nullptr;
 
     auto p = jit_1x1_conv_call_s();
@@ -292,7 +291,7 @@ void jit_uni_x8s8s32x_1x1_convolution_fwd_t<isa>::execute_forward_thr(
 
         p.oc_l_off = g * nb_oc + ocb * jcp.oc_block;
         p.post_ops_binary_rhs_arg_vec = post_ops_binary_rhs_arg_vec;
-        p.dst_orig = dst;
+        p.dst_orig = jcp.with_dw_conv ? pbuf : dst;
 
         (*kernel_)(&p);
     };

@@ -35,6 +35,7 @@
 #include <unistd.h>
 #include <sys/mman.h>
 
+#include "common/cpp_compat.hpp"
 #include "common/utils.hpp"
 
 namespace dnnl {
@@ -135,7 +136,7 @@ struct thread_args_t {
         , func_retval {} {}
     const F &func;
     std::tuple<Targs...> func_args;
-    typename std::result_of<F *(Targs...)>::type func_retval;
+    typename cpp_compat::invoke_result<F *, Targs...>::type func_retval;
 };
 
 template <typename T>
@@ -170,7 +171,7 @@ struct stack_checker_t {
     stack_checker_t(const std::string &context) : context_(context) {}
 
     template <typename F, typename... Targs>
-    typename std::result_of<F *(Targs...)>::type check(
+    typename cpp_compat::invoke_result<F *, Targs...>::type check(
             const F &func, const Targs &... func_args) {
 
         auto thread_args = utils::make_unique<thread_args_t<F, const Targs...>>(
@@ -262,9 +263,9 @@ private:
         size_t stack_size;
         res = pthread_attr_getstack(&attr, &stack_base, &stack_size);
         assert(res == 0);
+        MAYBE_UNUSED(res);
 
         size_t stack_consumption = 0;
-
         size_t start_unprotected_buffer
                 = get_stack_size() - get_page_size() * get_hard_stack_limit();
         for (size_t i = start_unprotected_buffer; i < stack_size; i++) {
@@ -273,13 +274,17 @@ private:
                 break;
             }
         }
-        MAYBE_UNUSED(res);
+        // OS can reserve a space of size up to 4096 (page size) in the
+        // beginning of stack buffer. We shouldn't take the reserved space into
+        // account when calculating stack consumption.
+        if (stack_consumption >= get_page_size())
+            stack_consumption -= get_page_size();
         return reinterpret_cast<void *>(stack_consumption);
     }
 
     static size_t get_stack_size() {
         static const size_t stack_size
-                = getenv_int("DNNL_SC_STACK_SIZE", 1024 * 1024 * 8);
+                = getenv_int_user("SC_STACK_SIZE", 1024 * 1024 * 8);
         if (stack_size % get_page_size() != 0) {
             printf("Stack checker: DNNL_SC_STACK_SIZE is expected to be "
                    "multiple of page size, which is %lu\n",
@@ -291,20 +296,20 @@ private:
     }
 
     static size_t get_hard_stack_limit() {
-        static const size_t hard_stack_limit = getenv_int(
-                "DNNL_SC_HARD_STACK_LIMIT", get_stack_size() / get_page_size());
+        static const size_t hard_stack_limit = getenv_int_user(
+                "SC_HARD_STACK_LIMIT", get_stack_size() / get_page_size());
         return hard_stack_limit;
     }
 
     static size_t get_soft_stack_limit() {
         // Set up the default limit of 5 pages (20480 bytes).
         static const size_t soft_stack_limit
-                = getenv_int("DNNL_SC_SOFT_STACK_LIMIT", 5);
+                = getenv_int_user("SC_SOFT_STACK_LIMIT", 5);
         return soft_stack_limit;
     }
 
     static bool is_trace_enabled() {
-        static const bool is_trace_enabled = getenv_int("DNNL_SC_TRACE", 1);
+        static const bool is_trace_enabled = getenv_int_user("SC_TRACE", 1);
         return is_trace_enabled;
     }
 

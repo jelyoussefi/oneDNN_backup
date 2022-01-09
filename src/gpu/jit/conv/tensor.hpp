@@ -437,8 +437,14 @@ public:
     }
 
     layout_t(const type_t &type, const expr_t &offset,
+            const std::vector<std::pair<int, dim_t>> &parts,
+            const std::vector<dim_t> &dims = {}, bool do_normalize = true);
+
+    layout_t(const type_t &type, const expr_t &offset,
             const std::string &format, const std::vector<dim_t> &dims = {},
-            bool do_normalize = true);
+            bool do_normalize = true)
+        : layout_t(type, offset, parse_format(format, int(dims.size())), dims,
+                do_normalize) {}
 
     layout_t(const memory_desc_wrapper &mdw, const std::string &format,
             bool do_normalize = true)
@@ -656,14 +662,10 @@ public:
     }
 
     // Returns a canonical representation of the layout:
+    // - Size one blocks are removed
     // - Consecutive dense blocks are merged
-    // - Size one blocks are:
-    //   - Removed (if keep_size_1_blocks is false)
-    //   - Reordered according to the heuristic (if keep_size_1_blocks is true)
-    // Optionally removes size one blocks and merges consecutive dense blocks
-    // representing the same dimension.
-    layout_t normalize(bool keep_size_1_blocks = false) const {
-        auto blocks = normalize_blocks(ndims(), blocks_, keep_size_1_blocks);
+    layout_t normalize() const {
+        auto blocks = normalize_blocks(ndims(), blocks_);
         return layout_t(type(), ndims(), offset(), blocks);
     }
 
@@ -701,6 +703,27 @@ public:
             stride *= b.block;
         }
         return true;
+    }
+
+    // Returns true if the layout has at least n inner blocks. For example:
+    // NChw32n16c - 2 inner blocks.
+    bool is_n_blocked(int n) const {
+        int block_count[layout_t::max_ndims] = {0};
+        for (auto &b : blocks_)
+            block_count[b.dim_idx]++;
+
+        int ninner_blocks = 0;
+        stride_t stride = 1;
+        for (auto &b : blocks_) {
+            if (b.stride != stride) break; // Not dense anymore.
+            if (block_count[b.dim_idx] == 1) break; // Outer block.
+            stride *= b.block;
+            ir_assert(block_count[b.dim_idx] > 1);
+            block_count[b.dim_idx]--;
+            ninner_blocks++;
+        }
+
+        return ninner_blocks >= n;
     }
 
     // Returns a packed layout where all blocks are contiguous, without gaps.
@@ -914,17 +937,20 @@ public:
 
     static std::vector<block_t> normalize_blocks(int ndims,
             const std::vector<block_t> &blocks,
-            bool keep_size_1_blocks = false) {
+            bool remove_size_1_blocks = true) {
         auto new_blocks = blocks;
 
         // Remove blocks of size 1.
-        for (auto it = new_blocks.begin(); it != new_blocks.end();) {
-            if (it->block == 1) {
-                it = new_blocks.erase(it);
-            } else {
-                ++it;
+        if (remove_size_1_blocks) {
+            for (auto it = new_blocks.begin(); it != new_blocks.end();) {
+                if (it->block == 1) {
+                    it = new_blocks.erase(it);
+                } else {
+                    ++it;
+                }
             }
         }
+
         // Merge same dimension blocks.
         block_t prev_b;
         prev_b.dim_idx = -1;
@@ -939,23 +965,6 @@ public:
                 prev_b = *it;
                 ++it;
             }
-        }
-        // No need to keep size one blocks, return.
-        if (!keep_size_1_blocks) return new_blocks;
-
-        bool seen[max_ndims] = {false};
-        for (auto &b : new_blocks)
-            seen[b.dim_idx] = true;
-
-        stride_t stride = (new_blocks.empty()
-                        ? stride_t(1)
-                        : new_blocks.back().stride * new_blocks.back().block);
-
-        // Insert size one blocks according to the following heuristic:
-        // TODO: Add documentation.
-        for (int i = ndims - 1; i >= 0; i--) {
-            if (seen[i]) continue;
-            new_blocks.emplace_back(i, 1, stride);
         }
 
         return new_blocks;
@@ -1090,8 +1099,8 @@ public:
             ir_assert(0 <= mask_id && mask_id < int(masks_.size()));
             new_masks[i / new_type.size()] = mask_id;
         }
-        dim_t new_elmes = utils::div_up(bytes, new_type.size());
-        layout_t _1d_layout(new_type, 0, std::vector<dim_t> {new_elmes});
+        dim_t new_elems = utils::div_up(bytes, new_type.size());
+        layout_t _1d_layout(new_type, 0, std::vector<dim_t> {new_elems});
         return mask_tensor_t(_1d_layout, new_masks, mask2ids_, id2masks_);
     }
 
@@ -1228,8 +1237,12 @@ public:
     explicit view_t(const layout_t &layout,
             const std::vector<expr_t> &_vvars = {},
             uint32_t bound_check_mask = 0)
+        : view_t(layout, _vvars, layout.dims(), bound_check_mask) {}
+
+    view_t(const layout_t &layout, const std::vector<expr_t> &_vvars,
+            const std::vector<dim_t> &_vdims, uint32_t bound_check_mask)
         : vvars_(_vvars)
-        , vdims_(layout.dims())
+        , vdims_(_vdims)
         , vstart_(layout.ndims(), 0)
         , tdims_(layout.ndims())
         , tlayout_(layout) {
@@ -1336,6 +1349,14 @@ public:
         return offset(vargs, ignore_offset) * type().size();
     }
 
+    int get_alignment(const constraint_set_t &cset) const {
+        // Alignment must be a power of 2.
+        const int base_alignment = 128;
+        int64_t f = get_max_const_factor(this->offset_in_bytes(), cset);
+        int alignment = f ? ir_utils::max_pow2_divisor(f) : base_alignment;
+        return std::min(base_alignment, alignment);
+    }
+
     int vvar_index(const expr_t &vvar) const {
         for (size_t i = 0; i < vvars_.size(); i++)
             if (vvar.is_same(vvars_[i])) return int(i);
@@ -1361,6 +1382,16 @@ public:
         auto ret = *this;
         ret.tlayout_ = tlayout_.make_dense();
         return ret;
+    }
+
+    bool is_masked_vdim(int vidx) const {
+        ir_assert(vidx >= 0 && vidx < ntdims());
+        ir_assert(tdims_[vidx].expr().is_equal(vvars_[vidx]));
+        ir_assert(has_zero_vstart())
+                << "Can't be reliably determined if the view is a sub-view.";
+        if (has_tmask(vidx)) return true;
+        if (vdims_[vidx] != tlayout_.dim(vidx)) return true;
+        return false;
     }
 
     bool can_convert_to_vlayout() const {
@@ -1496,8 +1527,15 @@ public:
             if (!is_const(inv_vstart)) return false;
 
             buf_view.set_vdim(buf_vvar, buf_vdim, buf_vstart);
-            // TODO: Check that mask doesn't contain vvars.
-            buf_view.set_tdim(i, buf_vvar, tdim.mask());
+
+            // Check that mask doesn't contain vvars - they can't be accessed
+            // in the buffered view.
+            auto &tmask = tdim.mask();
+            for (auto &vvar : vvars()) {
+                if (contains_object(tmask, vvar)) { return false; }
+            }
+
+            buf_view.set_tdim(i, buf_vvar, tmask);
             inv_view.set_tdim(i, tdim.expr() - inv_vstart);
         }
         buf_view.set_tlayout(tlayout_);
@@ -1623,16 +1661,15 @@ private:
 };
 
 std::vector<dim_t> normalize_conv_dims(std::vector<dim_t> &dims,
-        bool with_groups, int groups, bool is_dw, bool reduced_to_1d,
+        bool with_groups, int groups, bool is_dw, int reduced_dim,
         bool add_groups, bool is_wei);
 
 layout_t normalize_conv_layout(const layout_t &_layout, bool with_groups,
-        int groups, bool is_dw, bool reduced_to_1d, bool add_groups,
-        bool is_wei);
+        int groups, bool is_dw, int reduced_dim, bool add_groups, bool is_wei);
 
 void normalize_conv_layouts(layout_t &src_layout, layout_t &wei_layout,
         layout_t &dst_layout, bool with_groups, int groups, bool is_dw,
-        bool reduced_to_1d, bool add_groups);
+        int reduced_dim, bool add_groups);
 
 } // namespace jit
 } // namespace gpu

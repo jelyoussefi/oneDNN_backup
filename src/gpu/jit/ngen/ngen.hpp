@@ -170,7 +170,7 @@ protected:
 
     class Program {
         friend class BinaryCodeGenerator;
-        using Instruction = Instruction12;
+        using Instruction = typename std::conditional<(hw >= HW::XeHPC), InstructionXeHPC, Instruction12>::type;
         std::vector<uint64_t> &code;
 
         Program(InstructionStream &stream) : code(stream.code) {};
@@ -182,6 +182,7 @@ protected:
     };
 
     static constexpr bool isGen12 = (hw >= HW::Gen12LP);
+    int stepping = 0;
 
     Label _labelLocalIDsLoaded;
     Label _labelArgsLoaded;
@@ -289,7 +290,7 @@ private:
 #include "ngen_compiler_fix.hpp"
 
 public:
-    BinaryCodeGenerator() : defaultModifier{}, labelManager{}, sync{this}, load{this}, store{this}, atomic{this} {
+    explicit BinaryCodeGenerator(int stepping_ = 0) : stepping{stepping_}, defaultModifier{}, labelManager{}, sync{this}, load{this}, store{this}, atomic{this} {
         _workaround_();
         pushStream(rootStream);
     }
@@ -300,7 +301,10 @@ public:
     }
 
     std::vector<uint8_t> getCode();
-    size_t getRootStreamLength() const { return rootStream.length(); };
+    size_t getRootStreamLength() const { return rootStream.length(); }
+
+    int getStepping() const { return stepping; }
+    void setStepping(int stepping_) { stepping = stepping_; }
 
 protected:
     // Configuration.
@@ -721,25 +725,25 @@ protected:
     }
     template <typename DT = void>
     void mach(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const RegData &src1) {
-        opX(Opcode::mach, getDataType<DT>(), mod | AccWrEn, dst, src0, src1);
+        opX(Opcode::mach, getDataType<DT>(), (hw >= HW::XeHPC) ? mod : (mod | AccWrEn), dst, src0, src1);
     }
     template <typename DT = void>
     void mach(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const Immediate &src1) {
-        opX(Opcode::mach, getDataType<DT>(), mod | AccWrEn, dst, src0, src1);
+        opX(Opcode::mach, getDataType<DT>(), (hw >= HW::XeHPC) ? mod : (mod | AccWrEn), dst, src0, src1);
     }
     template <typename DT = void>
     void macl(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const RegData &src1) {
 #ifdef NGEN_SAFE
         if (hw < HW::Gen10) unsupported();
 #endif
-        opX(Opcode::mach, getDataType<DT>(), mod, dst, src0, src1);
+        opX((hw >= HW::XeHPC) ? Opcode::macl : Opcode::mach, getDataType<DT>(), mod, dst, src0, src1);
     }
     template <typename DT = void>
     void macl(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const Immediate &src1) {
 #ifdef NGEN_SAFE
         if (hw < HW::Gen10) unsupported();
 #endif
-        opX(Opcode::mach, getDataType<DT>(), mod, dst, src0, src1);
+        opX((hw >= HW::XeHPC) ? Opcode::macl : Opcode::mach, getDataType<DT>(), mod, dst, src0, src1);
     }
     template <typename DT = void>
     void mad(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const RegData &src1, const RegData &src2) {
@@ -1087,6 +1091,14 @@ protected:
         opX(isGen12 ? Opcode::smov_gen12 : Opcode::smov, getDataType<DT>(), mod, dst, src0, src1);
     }
     template <typename DT = void>
+    void srnd(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const RegData &src1) {
+        opX(Opcode::srnd, getDataType<DT>(), mod, dst, src0, src1);
+    }
+    template <typename DT = void>
+    void srnd(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const Immediate &src1) {
+        opX(Opcode::srnd, getDataType<DT>(), mod, dst, src0, src1);
+    }
+    template <typename DT = void>
     void subb(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const RegData &src1) {
         opX(Opcode::subb, getDataType<DT>(), mod | AccWrEn, dst, src0, src1);
     }
@@ -1181,6 +1193,18 @@ private:
         }
         void bar(const InstructionModifier &mod = InstructionModifier()) {
             this->operator()(SyncFunction::bar, mod);
+        }
+        void bar(const InstructionModifier &mod, uint32_t src0) {
+            this->operator()(SyncFunction::bar, mod, src0);
+        }
+        void bar(const InstructionModifier &mod, const RegData &src0) {
+            this->operator()(SyncFunction::bar, mod, src0);
+        }
+        void bar(uint32_t src0) {
+            this->operator()(SyncFunction::bar, InstructionModifier(), src0);
+        }
+        void bar(const RegData &src0) {
+            this->operator()(SyncFunction::bar, InstructionModifier(), src0);
         }
         void host(const InstructionModifier &mod = InstructionModifier()) {
             this->operator()(SyncFunction::host, mod);
@@ -1520,6 +1544,7 @@ template <typename... Targs> void setDefaultNoMask(Targs&&... args) { ngen::Bina
 template <typename... Targs> void setDefaultAutoSWSB(Targs&&... args) { ngen::BinaryCodeGenerator<hw>::setDefaultAutoSWSB(std::forward<Targs>(args)...); } \
 bool getDefaultNoMask() { return ngen::BinaryCodeGenerator<hw>::getDefaultNoMask(); } \
 bool getDefaultAutoSWSB() { return ngen::BinaryCodeGenerator<hw>::getDefaultAutoSWSB(); } \
+using ngen::BinaryCodeGenerator<hw>::stepping; \
 NGEN_FORWARD_EXTRA \
 NGEN_FORWARD_OP_NAMES \
 NGEN_FORWARD_MIN_MAX \
@@ -1671,7 +1696,15 @@ using ngen::BinaryCodeGenerator<hw>::transpose; \
 using ngen::BinaryCodeGenerator<hw>::L1UC_L3UC; using ngen::BinaryCodeGenerator<hw>::L1UC_L3C; using ngen::BinaryCodeGenerator<hw>::L1C_L3UC; using ngen::BinaryCodeGenerator<hw>::L1C_L3C; \
 using ngen::BinaryCodeGenerator<hw>::L1S_L3UC; using ngen::BinaryCodeGenerator<hw>::L1S_L3C; using ngen::BinaryCodeGenerator<hw>::L1IAR_L3C; using ngen::BinaryCodeGenerator<hw>::L1UC_L3WB; \
 using ngen::BinaryCodeGenerator<hw>::L1WT_L3UC; using ngen::BinaryCodeGenerator<hw>::L1WT_L3WB; using ngen::BinaryCodeGenerator<hw>::L1S_L3WB; using ngen::BinaryCodeGenerator<hw>::L1WB_L3WB;
-#define NGEN_FORWARD_REGISTERS_EXTRA3
+#define NGEN_FORWARD_REGISTERS_EXTRA3 \
+using ngen::BinaryCodeGenerator<hw>::any; using ngen::BinaryCodeGenerator<hw>::all; \
+using ngen::BinaryCodeGenerator<hw>::f2; using ngen::BinaryCodeGenerator<hw>::f3; \
+using ngen::BinaryCodeGenerator<hw>::sb16; using ngen::BinaryCodeGenerator<hw>::sb17; using ngen::BinaryCodeGenerator<hw>::sb18; using ngen::BinaryCodeGenerator<hw>::sb19; \
+using ngen::BinaryCodeGenerator<hw>::sb20; using ngen::BinaryCodeGenerator<hw>::sb21; using ngen::BinaryCodeGenerator<hw>::sb22; using ngen::BinaryCodeGenerator<hw>::sb23; \
+using ngen::BinaryCodeGenerator<hw>::sb24; using ngen::BinaryCodeGenerator<hw>::sb25; using ngen::BinaryCodeGenerator<hw>::sb26; using ngen::BinaryCodeGenerator<hw>::sb27; \
+using ngen::BinaryCodeGenerator<hw>::sb28; using ngen::BinaryCodeGenerator<hw>::sb29; using ngen::BinaryCodeGenerator<hw>::sb30; using ngen::BinaryCodeGenerator<hw>::sb31; \
+using ngen::BinaryCodeGenerator<hw>::NoAccSBSet; \
+using ngen::BinaryCodeGenerator<hw>::vnni;
 #define NGEN_FORWARD_REGISTERS NGEN_FORWARD_REGISTERS_BASE NGEN_FORWARD_REGISTERS_EXTRA1 NGEN_FORWARD_REGISTERS_EXTRA2 NGEN_FORWARD_REGISTERS_EXTRA3
 #endif
 
@@ -1701,7 +1734,8 @@ static inline Instruction12 encodeSyncInsertion(autoswsb::SyncInsertion &si)
     Instruction12 i;
 
     i.common.opcode = static_cast<int>(Opcode::sync);
-    i.common.swsb = SWSBInfo12(si.swsb, Opcode::sync).raw();
+    i.common.swsb = (hw >= HW::XeHPC) ? SWSBInfoXeHPC(si.swsb, Opcode::sync).raw()
+                                      :   SWSBInfo12(si.swsb, Opcode::sync).raw();
     i.common.maskCtrl = true;
     i.binary.cmod = static_cast<int>(si.fc);
 
@@ -2441,6 +2475,7 @@ BinaryCodeGenerator<hw>::opBranch(Opcode op, const InstructionModifier &mod, con
 
     encodeCommon12(i, op, emod, dst, tag);
 
+    i.branches.branchCtrl = emod.getBranchCtrl();
 
     i.binary.dst = encodeBinaryOperand12<true, false>(dst, tag).bits;
 
@@ -2488,6 +2523,7 @@ BinaryCodeGenerator<hw>::opBranch(Opcode op, const InstructionModifier &mod, con
 
     encodeCommon12(i, op, emod, dst, tag);
 
+    i.branches.branchCtrl = emod.getBranchCtrl();
 
     i.binary.dst = encodeBinaryOperand12<true, false>(dst, tag).bits;
     i.binary.src0Imm = true;
@@ -2531,6 +2567,7 @@ BinaryCodeGenerator<hw>::opBranch(Opcode op, const InstructionModifier &mod, con
 
     encodeCommon12(i, op, emod, dst, tag);
 
+    i.branches.branchCtrl = emod.getBranchCtrl();
 
     i.binary.dst = encodeBinaryOperand12<true, false>(dst, tag).bits;
     i.binary.src0 = encodeBinaryOperand12<false, false>(src0, tag).bits;

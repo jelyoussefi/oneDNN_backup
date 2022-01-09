@@ -97,19 +97,11 @@ struct gemm_inner_product_fwd_t : public gpu_primitive_t {
     };
 
     status_t init(engine_t *engine) override {
-        status_t gemm_status = pd()->gemm_pd_->create_primitive(gemm_, engine);
-        if (gemm_status != status::success) return gemm_status;
-
-        return status::success;
+        return create_nested_primitive(gemm_, pd()->gemm_pd_, engine);
     }
 
     status_t execute(const exec_ctx_t &ctx) const override {
         return execute_forward(ctx);
-    }
-
-protected:
-    primitive_list_t nested_primitives() const override {
-        return {gemm_.get()};
     }
 
 private:
@@ -175,18 +167,11 @@ struct gemm_inner_product_bwd_data_t : public gpu_primitive_t {
     };
 
     status_t init(engine_t *engine) override {
-        status_t gemm_status = pd()->gemm_pd_->create_primitive(gemm_, engine);
-        return gemm_status;
-        return status::success;
+        return create_nested_primitive(gemm_, pd()->gemm_pd_, engine);
     }
 
     status_t execute(const exec_ctx_t &ctx) const override {
         return execute_backward_data(ctx);
-    }
-
-protected:
-    primitive_list_t nested_primitives() const override {
-        return {gemm_.get()};
     }
 
 private:
@@ -300,20 +285,15 @@ struct gemm_inner_product_bwd_weights_t : public gpu_primitive_t {
     };
 
     status_t init(engine_t *engine) override {
-        status_t gemm_status = pd()->gemm_pd_->create_primitive(gemm_, engine);
-        if (gemm_status != status::success) return gemm_status;
+        CHECK(create_nested_primitive(gemm_, pd()->gemm_pd_, engine));
         if (pd()->with_bias())
-            CHECK(pd()->reduction_pd_->create_primitive(reduction_, engine));
+            CHECK(create_nested_primitive(
+                    reduction_, pd()->reduction_pd_, engine));
         return status::success;
     }
 
     status_t execute(const exec_ctx_t &ctx) const override {
         return execute_backward_weights(ctx);
-    }
-
-protected:
-    primitive_list_t nested_primitives() const override {
-        return {gemm_.get(), reduction_.get()};
     }
 
 private:

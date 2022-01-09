@@ -46,6 +46,7 @@ status_t brgemm_matmul_t<isa>::pd_t::init(engine_t *engine) {
     const auto wei_dt = weights_md_.data_type;
     const auto dst_dt = dst_md_.data_type;
 
+    const bool is_f32 = everyone_is(f32, src_dt, wei_dt, dst_dt);
     const bool is_int8 = one_of(src_dt, u8, s8) && wei_dt == s8
             && one_of(dst_dt, u8, s8, s32, f32, bf16);
     const bool is_bf16
@@ -56,7 +57,8 @@ status_t brgemm_matmul_t<isa>::pd_t::init(engine_t *engine) {
                 = (is_int8
                           && one_of(weights_md(1)->data_type, f32, s32, s8, u8,
                                   bf16))
-                || (is_bf16 && one_of(weights_md(1)->data_type, f32, bf16));
+                || (is_bf16 && one_of(weights_md(1)->data_type, f32, bf16))
+                || (is_f32 && weights_md(1)->data_type == f32);
         return IMPLICATION(with_bias(), is_bia_dt_correct && is_bias_1xN());
     };
 
@@ -69,8 +71,8 @@ status_t brgemm_matmul_t<isa>::pd_t::init(engine_t *engine) {
     auto check_attr_zero_points
             = [&]() -> bool { return attr()->zero_points_.common(); };
 
-    const bool problem_dt_correct = is_int8 || is_bf16;
-    bool ok = true && mayiuse(isa) && problem_dt_correct
+    const bool problem_dt_correct = is_int8 || is_bf16 || is_f32;
+    bool ok = mayiuse(isa) && problem_dt_correct
             && !has_runtime_dims_or_strides()
             && attr()->has_default_values(primitive_attr_t::skip_mask_t::oscale
                             | primitive_attr_t::skip_mask_t::zero_points_runtime
@@ -106,12 +108,14 @@ status_t brgemm_matmul_t<isa>::pd_t::init(engine_t *engine) {
                 bgmmc_.wei_dt, false, false, brgemm_row_major, alpha, vbeta,
                 LDA, bgmmc_.LDB, bgmmc_.LDC, vM, vN, vK));
 
-        auto LDD = bgmmc_.N;
+        auto LDD = bgmmc_.LDD;
         CHECK(brgemm_desc_set_postops(
                 &brg, attr(), &dst_md_, LDD, bgmmc_.bia_dt));
 
-        if (one_of(isa, avx512_core_bf16_amx_int8, avx512_core_bf16_amx_bf16)) {
-            brgemm_attr_t brgattr;
+        brgemm_attr_t brgattr;
+        constexpr bool is_amx = one_of(
+                isa, avx512_core_bf16_amx_int8, avx512_core_bf16_amx_bf16);
+        if (is_amx) {
             brgattr.max_bs = bgmmc_.brgemm_batch_size;
             brgattr.wary_tail_read = false;
 
@@ -120,12 +124,12 @@ status_t brgemm_matmul_t<isa>::pd_t::init(engine_t *engine) {
             brgattr.hint_expected_B_size = vN * vK * bgmmc_.brgemm_batch_size;
             brgattr.hint_expected_C_size = vM * vN * bgmmc_.brgemm_batch_size;
             brgattr.hint_innermost_loop = brgemm_ld_loop_innermost;
-
-            brgattr.generate_skip_accumulation
-                    = bgmmc_.post_ops_applicable && bgmmc_.nthr_k > 1;
-
-            CHECK(brgemm_desc_set_attr(&brg, brgattr));
         }
+
+        brgattr.generate_skip_accumulation
+                = bgmmc_.post_ops_applicable && bgmmc_.nthr_k > 1;
+
+        CHECK(brgemm_desc_set_attr(&brg, brgattr));
     }
 
     auto scratchpad = scratchpad_registry().registrar();
@@ -665,8 +669,13 @@ struct brgemm_matmul_t<isa>::brg_matmul_exec_ctx_t {
             // multitreaded execution mode
             const size_t reorder_zp_a_comp_offset
                     = weights_d.size() - weights_d.additional_buffer_size();
+            const size_t s8s8_buffer_sz = bgmmc.s8s8_compensation_required
+                    ? bgmmc.s8s8_comp_b_str * sizeof(int32_t)
+                    : 0;
             reorder_zp_a_comp_ptr_
-                    = (int32_t *)&data_B_ptr_[reorder_zp_a_comp_offset];
+                    = const_cast<int32_t *>(reinterpret_cast<const int32_t *>(
+                            &data_B_ptr_[reorder_zp_a_comp_offset
+                                    + s8s8_buffer_sz]));
         }
 
         // parallelization
@@ -680,6 +689,10 @@ struct brgemm_matmul_t<isa>::brg_matmul_exec_ctx_t {
         // minimum of these two values to prevent potential OOM issues.
         nthr_ = nstl::min(dnnl_get_current_num_threads(), bgmmc.nthr);
 
+        nthr_k_ = bgmmc.nthr_k > 0 && bgmmc.nthr_k <= nthr_ ? bgmmc.nthr_k : 1;
+        nthr_bmn_ = nthr_ / nthr_k_;
+        num_threads_used_ = nthr_k_ * nthr_bmn_;
+
         // If parallel_work_amount_ == 1 and parallel reduction is not used, we
         // limit num threads to 1 as parallel(1, ...) does not create parallel
         // section at all. We do not limit number of threads for case
@@ -687,11 +700,7 @@ struct brgemm_matmul_t<isa>::brg_matmul_exec_ctx_t {
         // overhead on spawning different number of OMP threads from layer to
         // layer.
         if (parallel_work_amount_ == 1 && !parallel_reduction_is_used())
-            nthr_ = 1;
-
-        nthr_k_ = bgmmc.nthr_k > 0 && bgmmc.nthr_k <= nthr_ ? bgmmc.nthr_k : 1;
-        nthr_bmn_ = nthr_ / nthr_k_;
-        num_threads_used_ = nthr_k_ * nthr_bmn_;
+            nthr_ = nthr_bmn_ = nthr_k_ = 1;
 
         const bool need_to_calculate_compensation_for_a
                 = bgmmc.has_zero_point_b;
@@ -830,16 +839,42 @@ struct brgemm_matmul_t<isa>::brg_matmul_exec_ctx_t {
     // strides for each tensor to get general sulution for all possible
     // dimension without significant overhead
     dim_t get_data_A_off(int b, int m, int k) const {
-        return bgmmc_.A_strides[2] * b + bgmmc_.A_strides[1] * m
-                + bgmmc_.A_strides[0] * k;
+        using namespace format_tag;
+        if (bgmmc_.src_tag == acbd || bgmmc_.src_tag == adbc) {
+            dim_t b_off = 0;
+            if (!bgmmc_.bcast_A_desc.bcast_mask) { // no broadcast
+                const dim_t batch_dim1 = bgmmc_.bcast_A_desc.batch_dims[1];
+                b_off = bgmmc_.A_strides[2] * (b % batch_dim1)
+                        + (b / batch_dim1) * bgmmc_.A_ptr_shift_b;
+            } else {
+                b_off = b * bgmmc_.A_ptr_shift_b;
+            }
+            return b_off + bgmmc_.A_strides[1] * m + bgmmc_.A_strides[0] * k;
+        } else {
+            return bgmmc_.A_strides[2] * b + bgmmc_.A_strides[1] * m
+                    + bgmmc_.A_strides[0] * k;
+        }
     }
-    dim_t get_data_B_off(int b, int k, int n) const {
-        int k_idx = bgmmc_.blocked_B ? k / bgmmc_.wei_k_blk : k;
-        int n_idx = bgmmc_.blocked_B ? n / bgmmc_.wei_n_blk : n;
 
-        return bgmmc_.B_strides[2] * b + bgmmc_.B_strides[1] * k_idx
-                + bgmmc_.B_strides[0] * n_idx
-                + get_data_B_off_within_block(k, n);
+    dim_t get_data_B_off(int b, int k, int n) const {
+        using namespace format_tag;
+        if (bgmmc_.wei_tag == acbd || bgmmc_.wei_tag == adbc) {
+            dim_t b_off = 0;
+            if (!bgmmc_.bcast_B_desc.bcast_mask) { // no broadcast
+                const dim_t batch_dim1 = bgmmc_.bcast_B_desc.batch_dims[1];
+                b_off = bgmmc_.B_strides[2] * (b % batch_dim1)
+                        + (b / batch_dim1) * bgmmc_.B_ptr_shift_b;
+            } else {
+                b_off = b * bgmmc_.B_ptr_shift_b;
+            }
+            return b_off + bgmmc_.B_strides[1] * k + bgmmc_.B_strides[0] * n;
+        } else {
+            int k_idx = bgmmc_.blocked_B ? k / bgmmc_.wei_k_blk : k;
+            int n_idx = bgmmc_.blocked_B ? n / bgmmc_.wei_n_blk : n;
+            return bgmmc_.B_strides[2] * b + bgmmc_.B_strides[1] * k_idx
+                    + bgmmc_.B_strides[0] * n_idx
+                    + get_data_B_off_within_block(k, n);
+        }
     }
 
     dim_t get_data_B_off_within_block(int k, int n) const {
@@ -855,8 +890,17 @@ struct brgemm_matmul_t<isa>::brg_matmul_exec_ctx_t {
     }
 
     dim_t get_data_C_off(int b, int m, int n) const {
-        return bgmmc_.C_strides[2] * b + bgmmc_.C_strides[1] * m
-                + bgmmc_.C_strides[0] * n;
+        using namespace format_tag;
+        assert(bgmmc_.dst_tag != adbc);
+        if (bgmmc_.dst_tag == acbd) {
+            const dim_t batch_dim1 = bgmmc_.bcast_A_desc.batch_dims[1];
+            dim_t b_off = bgmmc_.C_strides[2] * (b % batch_dim1)
+                    + (b / batch_dim1) * bgmmc_.C_ptr_shift_b;
+            return b_off + bgmmc_.C_strides[1] * m + bgmmc_.C_strides[0] * n;
+        } else {
+            return bgmmc_.C_strides[2] * b + bgmmc_.C_strides[1] * m
+                    + bgmmc_.C_strides[0] * n;
+        }
     }
 
     const char *get_bias_ptr(int n) const {
@@ -1014,6 +1058,9 @@ private:
 
 template struct brgemm_matmul_t<avx512_core_bf16_amx_int8>;
 template struct brgemm_matmul_t<avx512_core_bf16_amx_bf16>;
+template struct brgemm_matmul_t<avx512_core_bf16>;
+template struct brgemm_matmul_t<avx512_core_vnni>;
+template struct brgemm_matmul_t<avx512_core>;
 
 } // namespace matmul
 } // namespace x64

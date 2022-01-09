@@ -19,6 +19,8 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -26,19 +28,23 @@
 
 #include "dnn_types.hpp"
 #include "dnnl_debug.hpp"
+#include "utils/dims.hpp"
 
 namespace parser {
 
 extern bool last_parsed_is_problem;
-static const auto eol = std::string::npos;
+extern const size_t eol;
+extern std::stringstream help_ss;
 
-static inline std::string get_pattern(const std::string &option_name) {
-    return std::string("--") + option_name + std::string("=");
-}
+namespace parser_utils {
+std::string get_pattern(const std::string &option_name, bool with_args = true);
+void add_option_to_help(const std::string &option,
+        const std::string &help_message, bool with_args = true);
+} // namespace parser_utils
 
 template <typename T, typename F>
 static bool parse_vector_str(T &vec, const T &def, F process_func,
-        const char *str, char delimeter = ',') {
+        const std::string &str, char delimeter = ',') {
     const std::string s = str;
     if (s.empty()) return vec = def, true;
 
@@ -53,7 +59,7 @@ static bool parse_vector_str(T &vec, const T &def, F process_func,
 
 template <typename T, typename F>
 static bool parse_multivector_str(std::vector<T> &vec,
-        const std::vector<T> &def, F process_func, const char *str,
+        const std::vector<T> &def, F process_func, const std::string &str,
         char vector_delim = ',', char element_delim = ':') {
     auto process_subword = [&](const char *word) {
         T v, empty_def_v; // defualt value is not expected to be set here
@@ -68,8 +74,10 @@ static bool parse_multivector_str(std::vector<T> &vec,
 
 template <typename T, typename F>
 static bool parse_vector_option(T &vec, const T &def, F process_func,
-        const char *str, const std::string &option_name) {
-    const std::string pattern = get_pattern(option_name);
+        const char *str, const std::string &option_name,
+        const std::string &help_message = "") {
+    parser_utils::add_option_to_help(option_name, help_message);
+    const std::string pattern = parser_utils::get_pattern(option_name);
     if (pattern.find(str, 0, pattern.size()) == eol) return false;
     return parse_vector_str(vec, def, process_func, str + pattern.size());
 }
@@ -77,9 +85,10 @@ static bool parse_vector_option(T &vec, const T &def, F process_func,
 template <typename T, typename F>
 static bool parse_multivector_option(std::vector<T> &vec,
         const std::vector<T> &def, F process_func, const char *str,
-        const std::string &option_name, char vector_delim = ',',
-        char element_delim = ':') {
-    const std::string pattern = get_pattern(option_name);
+        const std::string &option_name, const std::string &help_message = "",
+        char vector_delim = ',', char element_delim = ':') {
+    parser_utils::add_option_to_help(option_name, help_message);
+    const std::string pattern = parser_utils::get_pattern(option_name);
     if (pattern.find(str, 0, pattern.size()) == eol) return false;
     return parse_multivector_str(vec, def, process_func, str + pattern.size(),
             vector_delim, element_delim);
@@ -87,8 +96,10 @@ static bool parse_multivector_option(std::vector<T> &vec,
 
 template <typename T, typename F>
 static bool parse_single_value_option(T &val, const T &def_val, F process_func,
-        const char *str, const std::string &option_name) {
-    const std::string pattern = get_pattern(option_name);
+        const char *str, const std::string &option_name,
+        const std::string &help_message = "") {
+    parser_utils::add_option_to_help(option_name, help_message);
+    const std::string pattern = parser_utils::get_pattern(option_name);
     if (pattern.find(str, 0, pattern.size()) == eol) return false;
     str = str + pattern.size();
     if (*str == '\0') return val = def_val, true;
@@ -98,32 +109,47 @@ static bool parse_single_value_option(T &val, const T &def_val, F process_func,
 template <typename T, typename F>
 static bool parse_cfg(T &vec, const T &def, F process_func, const char *str,
         const std::string &option_name = "cfg") {
-    return parse_vector_option(vec, def, process_func, str, option_name);
+    static const std::string help
+            = "CFG    (Default: `f32`)\n    Specifies data types `CFG` for "
+              "source, weights (if supported) and destination of operation.\n  "
+              "  `CFG` values vary from driver to driver.\n";
+    return parse_vector_option(vec, def, process_func, str, option_name, help);
 }
 
 template <typename T, typename F>
 static bool parse_alg(T &vec, const T &def, F process_func, const char *str,
         const std::string &option_name = "alg") {
-    return parse_vector_option(vec, def, process_func, str, option_name);
+    static const std::string help
+            = "ALG    (Default: depends on driver)\n    Specifies operation "
+              "algorithm `ALG`.\n    `ALG` values vary from driver to "
+              "driver.\n";
+    return parse_vector_option(vec, def, process_func, str, option_name, help);
 }
 
 template <typename T>
-bool parse_subattr(
-        std::vector<T> &vec, const char *str, const std::string &option_name) {
+bool parse_subattr(std::vector<T> &vec, const char *str,
+        const std::string &option_name, const std::string &help_message = "") {
     std::vector<T> def {T()};
     auto parse_subattr_func = [](const std::string &s) {
         T v;
         SAFE_V(v.from_str(s));
         return v;
     };
-    return parse_vector_option(vec, def, parse_subattr_func, str, option_name);
+    return parse_vector_option(
+            vec, def, parse_subattr_func, str, option_name, help_message);
 }
 
 template <typename S>
 bool parse_reset(S &settings, const char *str,
         const std::string &option_name = "reset") {
-    const std::string pattern = get_pattern(option_name);
-    if (pattern.find(str, 0, pattern.size() - 1) == eol) return false;
+    static const std::string help
+            = "\n    Instructs the driver to reset driver specific options to "
+              "their default values.\n    Neither global options nor "
+              "`--perf-template` option would be reset.";
+    parser_utils::add_option_to_help(option_name, help, false);
+
+    const std::string pattern = parser_utils::get_pattern(option_name, false);
+    if (pattern.find(str, 0, pattern.size()) == eol) return false;
     settings.reset();
     return true;
 }
@@ -185,8 +211,8 @@ bool parse_skip_nonlinear(std::vector<bool> &skip,
         const std::vector<bool> &def_skip, const char *str,
         const std::string &option_name = "skip-nonlinear");
 
-bool parse_strides(std::vector<strides_t> &strides,
-        const std::vector<strides_t> &def_strides, const char *str,
+bool parse_strides(std::vector<vdims_t> &strides,
+        const std::vector<vdims_t> &def_strides, const char *str,
         const std::string &option_name = "strides");
 
 bool parse_trivial_strides(std::vector<bool> &ts,
@@ -205,10 +231,12 @@ bool parse_perf_template(const char *&pt, const char *pt_def,
 bool parse_batch(const bench_f bench, const char *str,
         const std::string &option_name = "batch");
 
-// dim_t type
-void parse_dims(dims_t &dims, const char *str);
+bool parse_help(const char *str, const std::string &option_name = "help");
+bool parse_main_help(const char *str, const std::string &option_name = "help");
 
-void parse_multi_dims(std::vector<dims_t> &dims, const char *str);
+// prb_dims_t type
+void parse_prb_vdims(prb_vdims_t &prb_vdims, const std::string &str);
+void parse_prb_dims(prb_dims_t &prb_dims, const std::string &str);
 
 // service functions
 bool parse_bench_settings(const char *str);
